@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import "../App.css";
 import brandLogo from "../assets/brand-logo.png";
 import type {
@@ -18,11 +18,8 @@ import type {
 } from "./types";
 import {
   apiRequest,
-  calculatePriceSuggestions,
   datetimeFormatter,
   daysAgo,
-  defaultCategoryForKind,
-  defaultUnitForKind,
   exportRestockReportPdf,
   formatProductLabel,
   generateSkuSuggestion,
@@ -31,7 +28,6 @@ import {
   moneyFormatter,
   normalizeText,
   parseFloatSafe,
-  parseIntSafe,
   posMoneyFormatter,
   productKindLabel,
   roundToPosAmount,
@@ -70,15 +66,12 @@ function AppShell() {
   const [suggestionSource, setSuggestionSource] = useState<"aion" | "local">("local");
 
   const [posSearch, setPosSearch] = useState("");
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [customerName, setCustomerName] = useState("");
-  const [saleNotes, setSaleNotes] = useState("");
-  const [saleDiscountPercent, setSaleDiscountPercent] = useState("0");
-  const [amountPaid, setAmountPaid] = useState("");
-  const [submittingSale, setSubmittingSale] = useState(false);
+  const [cart] = useState<CartItem[]>([]);
+  const [saleDiscountPercent] = useState("0");
+  const [amountPaid] = useState("");
 
-  const [inventoryFilter, setInventoryFilter] = useState("");
-  const [serviceFilter, setServiceFilter] = useState("");
+  const [inventoryFilter] = useState("");
+  const [serviceFilter] = useState("");
   const [newProduct, setNewProduct] = useState({
     sku: "",
     name: "",
@@ -92,7 +85,7 @@ function AppShell() {
     expiresAt: "",
     description: "",
   });
-  const [newProductSkuManuallyEdited, setNewProductSkuManuallyEdited] = useState(false);
+  const [newProductSkuManuallyEdited] = useState(false);
   const [newService, setNewService] = useState({
     sku: "",
     name: "",
@@ -100,63 +93,15 @@ function AppShell() {
     price: "",
     description: "",
   });
-  const [newServiceSkuManuallyEdited, setNewServiceSkuManuallyEdited] = useState(false);
-  const [creatingProduct, setCreatingProduct] = useState(false);
-  const [creatingService, setCreatingService] = useState(false);
-  const [editServiceId, setEditServiceId] = useState("");
-  const [editServiceCost, setEditServiceCost] = useState("");
-  const [editServicePrice, setEditServicePrice] = useState("");
-  const [editServiceDescription, setEditServiceDescription] = useState("");
-  const [editServiceActive, setEditServiceActive] = useState(true);
-  const [savingServiceChanges, setSavingServiceChanges] = useState(false);
-  const [serviceQuickId, setServiceQuickId] = useState("");
-  const [serviceQuickCost, setServiceQuickCost] = useState("");
-  const [serviceQuickPrice, setServiceQuickPrice] = useState("");
-  const [updatingServiceQuick, setUpdatingServiceQuick] = useState(false);
+  const [newServiceSkuManuallyEdited] = useState(false);
 
-  const [stockProductId, setStockProductId] = useState("");
-  const [stockCost, setStockCost] = useState("");
-  const [stockChange, setStockChange] = useState("");
-  const [stockReason, setStockReason] = useState("Ajuste rapido");
-  const [adjustingStock, setAdjustingStock] = useState(false);
-
-  const [editProductId, setEditProductId] = useState("");
-  const [editCommercialName, setEditCommercialName] = useState("");
-  const [editCost, setEditCost] = useState("");
-  const [editPrice, setEditPrice] = useState("");
-  const [editMinStock, setEditMinStock] = useState("");
-  const [editExpiresAt, setEditExpiresAt] = useState("");
-  const [editActive, setEditActive] = useState(true);
-  const [savingProductChanges, setSavingProductChanges] = useState(false);
-  const [runningMonthlyCutoff, setRunningMonthlyCutoff] = useState(false);
-
-  const [appointmentStatusFilter, setAppointmentStatusFilter] = useState<
-    "ALL" | "SCHEDULED" | "COMPLETED" | "CANCELLED"
-  >("ALL");
-  const [appointmentDateFilter, setAppointmentDateFilter] = useState(
-    new Date().toISOString().slice(0, 10),
-  );
-  const [appointmentForm, setAppointmentForm] = useState({
-    patientName: "",
-    serviceType: "Consulta General",
-    appointmentAt: localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)),
-    notes: "",
-  });
-  const [savingAppointment, setSavingAppointment] = useState(false);
-
-  const [reportRange, setReportRange] = useState({
+  const [reportRange] = useState({
     from: localDateValue(daysAgo(30)),
     to: localDateValue(new Date()),
   });
-  const [reportDays, setReportDays] = useState("30");
-  const [coverageDays, setCoverageDays] = useState("14");
-  const [loadingReports, setLoadingReports] = useState(false);
-  const [generatingRestockPdf, setGeneratingRestockPdf] = useState(false);
-  const [salesReport, setSalesReport] = useState<SalesReport | null>(null);
-  const [reorderReport, setReorderReport] = useState<ReorderReport | null>(null);
-  const [inventoryMovementsReport, setInventoryMovementsReport] = useState<
-    InventoryMovementReportItem[]
-  >([]);
+  const [reportDays] = useState("30");
+  const [coverageDays] = useState("14");
+  const [reorderReport] = useState<ReorderReport | null>(null);
   const [lastBackupPath, setLastBackupPath] = useState("");
   const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
 
@@ -218,75 +163,6 @@ function AppShell() {
   useEffect(() => {
     void refreshCoreData();
   }, [refreshCoreData]);
-
-  useEffect(() => {
-    if (!stockProductId && products.length > 0) {
-      setStockProductId(String(products[0].id));
-    }
-    if (!editProductId && products.length > 0) {
-      setEditProductId(String(products[0].id));
-    }
-  }, [products, stockProductId, editProductId]);
-
-  useEffect(() => {
-    if (!editServiceId && services.length > 0) {
-      setEditServiceId(String(services[0].id));
-    }
-  }, [editServiceId, services]);
-
-  useEffect(() => {
-    if (!serviceQuickId && services.length > 0) {
-      setServiceQuickId(String(services[0].id));
-    }
-  }, [serviceQuickId, services]);
-
-  useEffect(() => {
-    if (!editProductId) {
-      return;
-    }
-
-    const selectedProduct = products.find((product) => product.id === Number(editProductId));
-    if (!selectedProduct) {
-      return;
-    }
-
-    setEditCommercialName(selectedProduct.commercialName ?? "");
-    setEditCost(String(selectedProduct.cost));
-    setEditPrice(String(selectedProduct.price));
-    setEditMinStock(String(selectedProduct.minStock));
-    setEditExpiresAt(selectedProduct.expiresAt ? selectedProduct.expiresAt.slice(0, 10) : "");
-    setEditActive(selectedProduct.isActive);
-  }, [editProductId, products]);
-
-  useEffect(() => {
-    if (!editServiceId) {
-      return;
-    }
-
-    const selectedService = services.find((service) => service.id === Number(editServiceId));
-    if (!selectedService) {
-      return;
-    }
-
-    setEditServicePrice(String(selectedService.price));
-    setEditServiceCost(String(selectedService.cost));
-    setEditServiceDescription(selectedService.description ?? "");
-    setEditServiceActive(selectedService.isActive);
-  }, [editServiceId, services]);
-
-  useEffect(() => {
-    if (!serviceQuickId) {
-      return;
-    }
-
-    const selectedService = services.find((service) => service.id === Number(serviceQuickId));
-    if (!selectedService) {
-      return;
-    }
-
-    setServiceQuickCost(String(selectedService.cost));
-    setServiceQuickPrice(String(selectedService.price));
-  }, [serviceQuickId, services]);
 
   useEffect(() => {
     if (newProductSkuManuallyEdited) {
@@ -365,61 +241,16 @@ function AppShell() {
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [serviceFilter, services]);
 
-  const filteredAppointments = useMemo(() => {
-    return appointments
-      .filter((appointment) => {
-        if (appointmentStatusFilter === "ALL") {
-          return true;
-        }
-        return appointment.status === appointmentStatusFilter;
-      })
-      .filter((appointment) => {
-        if (!appointmentDateFilter) {
-          return true;
-        }
-        return appointment.appointmentAt.slice(0, 10) === appointmentDateFilter;
-      })
-      .sort((a, b) => a.appointmentAt.localeCompare(b.appointmentAt));
-  }, [appointments, appointmentDateFilter, appointmentStatusFilter]);
-
-  const selectedEditProduct = useMemo(
-    () => products.find((product) => product.id === Number(editProductId)) ?? null,
-    [editProductId, products],
-  );
-
-  const selectedEditService = useMemo(
-    () => services.find((service) => service.id === Number(editServiceId)) ?? null,
-    [editServiceId, services],
-  );
-
-  const selectedQuickService = useMemo(
-    () => services.find((service) => service.id === Number(serviceQuickId)) ?? null,
-    [serviceQuickId, services],
-  );
-
   const cartSubtotalRaw = useMemo(
-    () =>
-      cart.reduce(
-        (sum, item) => sum + item.unitPrice * item.quantity,
-        0,
-      ),
+    () => cart.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0),
     [cart],
   );
-
   const cartSubtotal = roundToPosAmount(cartSubtotalRaw);
-
-  const discountPercent = Math.min(
-    100,
-    Math.max(0, parseFloatSafe(saleDiscountPercent, 0)),
-  );
+  const discountPercent = Math.min(100, Math.max(0, parseFloatSafe(saleDiscountPercent, 0)));
   const discountValue = roundToPosAmount((cartSubtotal * discountPercent) / 100);
   const cartTotal = Math.max(0, cartSubtotal - discountValue);
   const amountPaidValue = roundToPosAmount(parseFloatSafe(amountPaid, 0));
   const changeDue = Math.max(0, amountPaidValue - cartTotal);
-  const pendingAmount = Math.max(0, cartTotal - amountPaidValue);
-  const backendDiscountValue = Number(
-    Math.max(0, cartSubtotalRaw - cartTotal).toFixed(2),
-  );
 
   async function runPriceSuggestions(trigger: "manual" | "monthly-cutoff" | "cost-increase" = "manual") {
     setLoadingSuggestions(true);
@@ -630,6 +461,15 @@ function AppShell() {
               <article className="surface">
                 <p className="muted-line">
                   La base ya fue preparada para extraer tipos, utilidades y estructura de shell sin dejar archivos duplicados ni contenido huérfano.
+                </p>
+                <p className="muted-line">
+                  Productos: <strong>{filteredInventory.length}</strong> | Servicios: <strong>{filteredServices.length}</strong> | Citas: <strong>{appointments.length}</strong> | Alertas de caducidad: <strong>{expiryAlerts.length}</strong>
+                </p>
+                <p className="muted-line">
+                  Busqueda POS disponible: <strong>{posProducts.length}</strong> resultados | Cambio estimado actual: <strong>{posMoneyFormatter.format(changeDue)}</strong>
+                </p>
+                <p className="muted-line">
+                  Parametros de reportes preparados: {reportRange.from} a {reportRange.to} | {reportDays} dias | cobertura {coverageDays} dias.
                 </p>
                 <div className="reports-action-row">
                   <button className="secondary-btn" type="button" onClick={() => void runPriceSuggestions()}>
