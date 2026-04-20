@@ -13,6 +13,68 @@ enum ProductKind {
   MEDICAL_SERVICE
 }
 
+enum AppointmentStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+enum UserRole {
+  ADMIN
+  CASHIER
+  DOCTOR
+  ASSISTANT
+  INVENTORY
+}
+
+enum CashSessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  TRANSFER
+  MIXED
+}
+
+enum PurchaseStatus {
+  DRAFT
+  RECEIVED
+  CANCELLED
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model User {
+  id             Int           @id @default(autoincrement())
+  fullName       String
+  username       String        @unique
+  passwordHash   String
+  role           UserRole
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  cashSessions   CashSession[]
+  sales          Sale[]
+  appointments   Appointment[] @relation("AppointmentCreatedBy")
+  consultations  Consultation[]
+  auditLogs      AuditLog[]
+  alertEvents    AlertEvent[]
+}
+
 model Product {
   id                 Int                 @id @default(autoincrement())
   sku                String              @unique
@@ -33,17 +95,106 @@ model Product {
   saleItems          SaleItem[]
   inventoryMovements InventoryMovement[]
   costEvents         ProductCostEvent[]
+  purchaseItems      PurchaseItem[]
+  lots               ProductLot[]
+  supplyUsages       ConsultationSupplyUsage[]
+}
+
+model ProductLot {
+  id            Int      @id @default(autoincrement())
+  productId     Int
+  lotCode       String
+  quantity      Int      @default(0)
+  expiresAt     DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, lotCode])
+}
+
+model Supplier {
+  id            Int        @id @default(autoincrement())
+  name          String
+  contactName   String?
+  phone         String?
+  email         String?
+  address       String?
+  notes         String?
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  purchases     Purchase[]
+}
+
+model Purchase {
+  id            Int            @id @default(autoincrement())
+  supplierId    Int?
+  reference     String?
+  notes         String?
+  subtotal      Float          @default(0)
+  total         Float          @default(0)
+  status        PurchaseStatus @default(DRAFT)
+  receivedAt    DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  supplier      Supplier?      @relation(fields: [supplierId], references: [id])
+  items         PurchaseItem[]
+}
+
+model PurchaseItem {
+  id            Int      @id @default(autoincrement())
+  purchaseId    Int
+  productId     Int
+  quantity      Int
+  unitCost      Float
+  lineTotal     Float
+  purchase      Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product       Product  @relation(fields: [productId], references: [id])
+}
+
+model CashRegister {
+  id            Int           @id @default(autoincrement())
+  name          String
+  isActive      Boolean       @default(true)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  sessions      CashSession[]
+}
+
+model CashSession {
+  id              Int               @id @default(autoincrement())
+  cashRegisterId  Int
+  openedById      Int
+  openingAmount   Float             @default(0)
+  closingAmount   Float?
+  expectedAmount  Float?
+  difference      Float?
+  status          CashSessionStatus @default(OPEN)
+  openedAt        DateTime          @default(now())
+  closedAt        DateTime?
+  cashRegister    CashRegister      @relation(fields: [cashRegisterId], references: [id])
+  openedBy        User              @relation(fields: [openedById], references: [id])
+  sales           Sale[]
 }
 
 model Sale {
-  id           Int        @id @default(autoincrement())
-  createdAt    DateTime   @default(now())
-  customerName String?
-  notes        String?
-  subtotal     Float
-  discount     Float      @default(0)
-  total        Float
-  items        SaleItem[]
+  id              Int        @id @default(autoincrement())
+  cashSessionId   Int?
+  cashierId       Int?
+  createdAt       DateTime   @default(now())
+  customerName    String?
+  notes           String?
+  subtotal        Float
+  discount        Float      @default(0)
+  total           Float
+  amountReceived  Float?
+  changeDelivered Float?
+  paymentMethod   PaymentMethod?
+  paymentRef      String?
+  items           SaleItem[]
+  cashSession     CashSession? @relation(fields: [cashSessionId], references: [id])
+  cashier         User?      @relation(fields: [cashierId], references: [id])
 }
 
 model SaleItem {
@@ -57,14 +208,26 @@ model SaleItem {
   product   Product @relation(fields: [productId], references: [id])
 }
 
-enum AppointmentStatus {
-  SCHEDULED
-  COMPLETED
-  CANCELLED
+model Patient {
+  id               Int            @id @default(autoincrement())
+  fullName         String
+  phone            String?
+  email            String?
+  birthDate        DateTime?
+  gender           String?
+  address          String?
+  allergies        String?
+  medicalNotes     String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  appointments     Appointment[]
+  consultations    Consultation[]
 }
 
 model Appointment {
   id            Int               @id @default(autoincrement())
+  patientId     Int?
+  createdById   Int?
   patientName   String
   serviceType   String
   notes         String?
@@ -72,15 +235,45 @@ model Appointment {
   status        AppointmentStatus @default(SCHEDULED)
   createdAt     DateTime          @default(now())
   updatedAt     DateTime          @updatedAt
+  patient       Patient?          @relation(fields: [patientId], references: [id])
+  createdBy     User?             @relation("AppointmentCreatedBy", fields: [createdById], references: [id])
+}
+
+model Consultation {
+  id               Int                      @id @default(autoincrement())
+  patientId        Int
+  doctorId         Int?
+  appointmentId    Int?
+  reason           String
+  diagnosis        String?
+  notes            String?
+  followUpAt       DateTime?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  patient          Patient                  @relation(fields: [patientId], references: [id])
+  doctor           User?                    @relation(fields: [doctorId], references: [id])
+  supplyUsages     ConsultationSupplyUsage[]
+}
+
+model ConsultationSupplyUsage {
+  id              Int           @id @default(autoincrement())
+  consultationId  Int
+  productId       Int
+  quantity        Int
+  notes           String?
+  createdAt       DateTime      @default(now())
+  consultation    Consultation  @relation(fields: [consultationId], references: [id], onDelete: Cascade)
+  product         Product       @relation(fields: [productId], references: [id])
 }
 
 model InventoryMovement {
-  id        Int      @id @default(autoincrement())
-  productId Int
-  change    Int
-  reason    String
-  createdAt DateTime @default(now())
-  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id          Int      @id @default(autoincrement())
+  productId   Int
+  change      Int
+  reason      String
+  lotCode     String?
+  createdAt   DateTime @default(now())
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
 }
 
 model ProductCostEvent {
@@ -92,6 +285,44 @@ model ProductCostEvent {
   reason       String
   createdAt    DateTime @default(now())
   product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model Alert {
+  id             Int            @id @default(autoincrement())
+  code           String
+  title          String
+  description    String?
+  severity       AlertSeverity
+  status         AlertStatus    @default(ACTIVE)
+  relatedEntity  String?
+  relatedId      Int?
+  createdAt      DateTime       @default(now())
+  resolvedAt     DateTime?
+  events         AlertEvent[]
+
+  @@index([status, severity])
+}
+
+model AlertEvent {
+  id          Int      @id @default(autoincrement())
+  alertId     Int
+  userId      Int?
+  action      String
+  notes       String?
+  createdAt   DateTime @default(now())
+  alert       Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  user        User?    @relation(fields: [userId], references: [id])
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  userId      Int?
+  entity      String
+  entityId    Int?
+  action      String
+  payload     Json?
+  createdAt   DateTime @default(now())
+  user        User?    @relation(fields: [userId], references: [id])
 }
 
 model AiSuggestion {
