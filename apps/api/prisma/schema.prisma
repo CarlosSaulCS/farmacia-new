@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum ProductKind {
+  MEDICATION
+  MEDICAL_SUPPLY
+  MEDICAL_SERVICE
+}
+
+model Product {
+  id                 Int                 @id @default(autoincrement())
+  sku                String              @unique
+  name               String
+  commercialName     String?
+  kind               ProductKind         @default(MEDICATION)
+  description        String?
+  category           String?
+  unit               String              @default("unidad")
+  cost               Float               @default(0)
+  price              Float
+  stock              Int                 @default(0)
+  minStock           Int                 @default(0)
+  expiresAt          DateTime?
+  isActive           Boolean             @default(true)
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  saleItems          SaleItem[]
+  inventoryMovements InventoryMovement[]
+  costEvents         ProductCostEvent[]
+}
+
+model Sale {
+  id           Int        @id @default(autoincrement())
+  createdAt    DateTime   @default(now())
+  customerName String?
+  notes        String?
+  subtotal     Float
+  discount     Float      @default(0)
+  total        Float
+  items        SaleItem[]
+}
+
+model SaleItem {
+  id        Int     @id @default(autoincrement())
+  saleId    Int
+  productId Int
+  quantity  Int
+  unitPrice Float
+  lineTotal Float
+  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id])
+}
+
+enum AppointmentStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+}
+
+model Appointment {
+  id            Int               @id @default(autoincrement())
+  patientName   String
+  serviceType   String
+  notes         String?
+  appointmentAt DateTime
+  status        AppointmentStatus @default(SCHEDULED)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+}
+
+model InventoryMovement {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  change    Int
+  reason    String
+  createdAt DateTime @default(now())
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model ProductCostEvent {
+  id           Int      @id @default(autoincrement())
+  productId    Int
+  previousCost Float
+  newCost      Float
+  changePct    Float
+  reason       String
+  createdAt    DateTime @default(now())
+  product      Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model AiSuggestion {
+  id             Int      @id @default(autoincrement())
+  suggestionType String
+  payload        Json
+  createdAt      DateTime @default(now())
+}

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+.env
+.env.local
+*.log
+
+apps/api/prisma/dev.db
+apps/api/prisma/dev.db-journal
+apps/api/backups/
+apps/web/node_modules/
+apps/web/dist/
+apps/desktop/dist/
+apps/desktop/node_modules/
+
+.fake

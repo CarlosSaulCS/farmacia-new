@@ -1,0 +1,23 @@
+{
+  "name": "farmacia-new",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sistema de farmacia POS + administracion + analitica",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace @farmacia/api",
+    "dev:web": "npm run dev --workspace @farmacia/web",
+    "dev:desktop": "npm run dev --workspace @farmacia/desktop",
+    "build": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run build --workspace @farmacia/desktop",
+    "db:push": "npm run db:push --workspace @farmacia/api",
+    "db:seed": "npm run db:seed --workspace @farmacia/api",
+    "package:desktop": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run dist --workspace @farmacia/desktop"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "appId": "com.aion.farmacia",
+  "productName": "Farmacia",
+  "directories": {
+    "output": "dist",
+    "buildResources": "build"
+  },
+  "files": [
+    "main.cjs",
+    "package.json",
+    "runtime/api/**/*"
+  ],
+  "asarUnpack": [
+    "**/*.node",
+    "**/.prisma/**"
+  ],
+  "extraFiles": [
+    {
+      "from": "../web/dist",
+      "to": "web",
+      "filter": [
+        "**/*",
+        "!**/logo 1.png",
+        "!**/logo.png"
+      ]
+    },
+    {
+      "from": "../api/dist",
+      "to": "api/dist",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "../api/prisma",
+      "to": "api/prisma",
+      "filter": [
+        "dev.db",
+        "schema.prisma"
+      ]
+    },
+    {
+      "from": "../api/package.json",
+      "to": "api/package.json"
+    },
+    {
+      "from": "../../node_modules/@prisma/client",
+      "to": "api/node_modules/@prisma/client",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "../../node_modules/.prisma",
+      "to": "api/node_modules/.prisma",
+      "filter": [
+        "**/*"
+      ]
+    }
+  ],
+  "win": {
+    "icon": "build/icon.png",
+    "signAndEditExecutable": false,
+    "verifyUpdateCodeSignature": false,
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "Farmacia-${version}-Setup.${ext}"
+  }
+}
