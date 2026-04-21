@@ -99,6 +99,11 @@ const inventoryKinds: ProductKindCode[] = [
 const serviceKind = ProductKind.MEDICAL_SERVICE;
 const expirationAlertDays = 45;
 const appointmentReminderMinutes = 60;
+const genericMedicationCategories = new Set([
+  "",
+  "Medicamento",
+  "Medicamentos generales",
+]);
 
 const productBaseSchema = z.object({
   sku: z.string().min(2).max(40).optional(),
@@ -117,7 +122,9 @@ const productBaseSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
-const productCreateSchema = productBaseSchema.refine((value) => value.price >= value.cost, {
+const productCreateSchema = productBaseSchema.refine((value) => {
+  return value.kind === serviceKind || value.price >= value.cost;
+}, {
   path: ["price"],
   message: "El precio al publico no puede ser menor al costo.",
 });
@@ -129,6 +136,9 @@ const productUpdateSchema = productBaseSchema
   })
   .refine((value) => {
     if (typeof value.price === "number" && typeof value.cost === "number") {
+      if (value.kind === serviceKind) {
+        return true;
+      }
       return value.price >= value.cost;
     }
     return true;
@@ -296,7 +306,32 @@ function defaultCategoryForKind(kind: ProductKindCode): string {
   if (kind === ProductKind.MEDICAL_SERVICE) {
     return "Servicio medico";
   }
-  return "Medicamento";
+  return "Medicamentos generales";
+}
+
+function inferProductCategory(name: string, kind: ProductKindCode): string {
+  if (kind !== ProductKind.MEDICATION) {
+    return defaultCategoryForKind(kind);
+  }
+
+  const normalized = normalizeSearchValue(name);
+  if (/(amoxicilina|azitromicina|ampicilina|cef|cipro|clindamicina|metronidazol)/.test(normalized)) {
+    return "Antibioticos";
+  }
+  if (/(losartan|metformina|enalapril|amlodipino|atorvastatina|glibenclamida|insulina)/.test(normalized)) {
+    return "Cronicos";
+  }
+  if (/(paracetamol|ibuprofeno|diclofenaco|naproxeno|ketorolaco|aspirina)/.test(normalized)) {
+    return "Analgesicos y antiinflamatorios";
+  }
+  if (/(loratadina|cetirizina|salbutamol|ambroxol|dextrometorfano|clorfenamina)/.test(normalized)) {
+    return "Alergias y respiratorio";
+  }
+  if (/(omeprazol|loperamida|butilhioscina|metoclopramida|ranitidina|antiacido)/.test(normalized)) {
+    return "Gastrointestinal";
+  }
+
+  return "Medicamentos generales";
 }
 
 function defaultUnitForKind(kind: ProductKindCode): string {
@@ -1630,6 +1665,44 @@ async function ensureSchemaCompatibility() {
       });
     });
   }
+
+  const productsToCategorize = await prisma.product.findMany({
+    select: {
+      id: true,
+      name: true,
+      kind: true,
+      category: true,
+    },
+  });
+
+  for (const product of productsToCategorize) {
+    const currentCategory = product.category?.trim() ?? "";
+    let nextCategory: string | null = null;
+
+    if (
+      product.kind === ProductKind.MEDICATION &&
+      genericMedicationCategories.has(currentCategory)
+    ) {
+      nextCategory = inferProductCategory(product.name, product.kind);
+    } else if (
+      product.kind === ProductKind.MEDICAL_SUPPLY &&
+      (!currentCategory || currentCategory === "Insumo medico")
+    ) {
+      nextCategory = defaultCategoryForKind(product.kind);
+    } else if (
+      product.kind === ProductKind.MEDICAL_SERVICE &&
+      !currentCategory
+    ) {
+      nextCategory = defaultCategoryForKind(product.kind);
+    }
+
+    if (nextCategory && nextCategory !== currentCategory) {
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { category: nextCategory },
+      });
+    }
+  }
 }
 
 async function buildSalesReport(from: Date, to: Date) {
@@ -1954,6 +2027,14 @@ async function listRecentInventoryMovements(take = 120) {
   }));
 }
 
+function calculateMinimumRestockTarget(stock: number, minStock: number): number {
+  if (stock <= minStock) {
+    return Math.max(minStock + 1, stock + 1, 1);
+  }
+
+  return minStock;
+}
+
 async function buildReorderReport(days: number, coverageDays: number) {
   const periodDays = Math.max(1, days);
   const desiredCoverageDays = Math.max(1, coverageDays);
@@ -1999,8 +2080,12 @@ async function buildReorderReport(days: number, coverageDays: number) {
       const soldInPeriod = soldByProduct.get(product.id) ?? 0;
       const dailyVelocity = soldInPeriod / periodDays;
       const safetyStock = Math.max(product.minStock, Math.ceil(dailyVelocity * 3));
-      const targetStock = Math.max(
+      const minimumRestockTarget = calculateMinimumRestockTarget(
+        product.stock,
         product.minStock,
+      );
+      const targetStock = Math.max(
+        minimumRestockTarget,
         Math.ceil(dailyVelocity * desiredCoverageDays + safetyStock),
       );
       const suggestedOrder = Math.max(0, targetStock - product.stock);
@@ -2524,7 +2609,7 @@ app.post(
 
     const normalizedCategory = payload.category?.trim()
       ? payload.category.trim()
-      : defaultCategoryForKind(payload.kind);
+      : inferProductCategory(payload.name, payload.kind);
 
     const normalizedUnit = payload.unit?.trim()
       ? payload.unit.trim().toLowerCase()
@@ -2538,6 +2623,7 @@ app.post(
     }
 
     const resolvedUnit = payload.kind === serviceKind ? "servicio" : normalizedUnit;
+    const resolvedCost = payload.kind === serviceKind ? 0 : payload.cost;
     const resolvedStock = payload.kind === serviceKind ? 0 : payload.stock;
     const resolvedMinStock = payload.kind === serviceKind ? 0 : payload.minStock;
     const resolvedExpiresAt = resolveProductExpirationDate(
@@ -2563,6 +2649,7 @@ app.post(
           commercialName: normalizedCommercialName,
           category: normalizedCategory,
           unit: resolvedUnit,
+          cost: resolvedCost,
           stock: resolvedStock,
           minStock: resolvedMinStock,
           expiresAt: resolvedExpiresAt,
@@ -2574,7 +2661,7 @@ app.post(
           quantity: resolvedStock,
           lotCode: payload.lotCode,
           expiresAt: resolvedExpiresAt,
-          cost: payload.cost,
+          cost: resolvedCost,
         });
       }
 
@@ -2611,9 +2698,9 @@ app.put(
       }
       const { lotCode: _ignoredLotCode, ...payloadForUpdate } = payload;
 
-      const nextCost = payload.cost ?? previousProduct.cost;
-      const nextPrice = payload.price ?? previousProduct.price;
       const nextKind = payload.kind ?? previousProduct.kind;
+      const nextCost = nextKind === serviceKind ? 0 : (payload.cost ?? previousProduct.cost);
+      const nextPrice = payload.price ?? previousProduct.price;
       const nextSku =
         typeof payload.sku === "string"
           ? normalizeSkuInput(payload.sku)
@@ -2628,7 +2715,7 @@ app.put(
         throw new ApiError(400, "El SKU debe contener al menos 2 caracteres validos.");
       }
 
-      if (nextPrice < nextCost) {
+      if (nextKind !== serviceKind && nextPrice < nextCost) {
         throw new ApiError(
           400,
           "El precio al publico no puede ser menor al costo del producto.",
@@ -2647,6 +2734,26 @@ app.put(
         payload.expiresAt,
         previousProduct.expiresAt,
       );
+      const currentCategory = previousProduct.category?.trim() ?? "";
+      let nextCategory: string | null | undefined = payload.category;
+
+      if (typeof payload.category === "string") {
+        nextCategory = payload.category.trim() || null;
+      } else if (
+        (typeof payload.name === "string" || typeof payload.kind === "string") &&
+        nextKind === ProductKind.MEDICATION &&
+        genericMedicationCategories.has(currentCategory)
+      ) {
+        nextCategory = inferProductCategory(
+          payload.name ?? previousProduct.name,
+          nextKind,
+        );
+      } else if (
+        (typeof payload.kind === "string" || !currentCategory) &&
+        nextKind !== ProductKind.MEDICATION
+      ) {
+        nextCategory = defaultCategoryForKind(nextKind);
+      }
 
       const updatedProduct = await tx.product.update({
         where: { id: productId },
@@ -2654,15 +2761,13 @@ app.put(
           ...payloadForUpdate,
           sku: typeof payload.sku === "string" ? nextSku : undefined,
           kind: nextKind,
-          category:
-            typeof payload.category === "string"
-              ? payload.category.trim() || null
-              : payload.category,
+          category: nextCategory,
           commercialName:
             typeof payload.commercialName === "string"
               ? payload.commercialName.trim() || null
               : payload.commercialName,
           unit: nextUnit,
+          cost: nextKind === serviceKind ? 0 : payload.cost,
           stock:
             nextKind === serviceKind
               ? 0
@@ -2700,7 +2805,11 @@ app.put(
         reason: string;
       } | null = null;
 
-      if (typeof payload.cost === "number" && payload.cost > previousProduct.cost) {
+      if (
+        nextKind !== serviceKind &&
+        typeof payload.cost === "number" &&
+        payload.cost > previousProduct.cost
+      ) {
         const previousCost = previousProduct.cost;
         const newCost = payload.cost;
         const changePct = previousCost > 0 ? (newCost - previousCost) / previousCost : 1;
@@ -2984,11 +3093,14 @@ app.get(
 
     const lowStockAlerts = products
       .map((product) => {
-        const targetStock = product.minStock;
+        const targetStock = calculateMinimumRestockTarget(
+          product.stock,
+          product.minStock,
+        );
         return {
           ...product,
           targetStock,
-          shortage: targetStock - product.stock,
+          shortage: Math.max(0, targetStock - product.stock),
         };
       })
       .filter((product) => product.stock <= product.targetStock)
@@ -3842,6 +3954,29 @@ app.get(
 
     const report = await buildReorderReport(days, coverageDays);
     res.json(report);
+  }),
+);
+
+app.get(
+  "/api/ai/price-adjustments",
+  asyncHandler(async (req, res) => {
+    const rawMarketShift = Number.parseFloat(String(req.query.marketShift ?? "0"));
+    const marketShift = Number.isNaN(rawMarketShift)
+      ? 0
+      : Math.min(0.25, Math.max(-0.25, rawMarketShift));
+    const rawTrigger = String(req.query.trigger ?? "manual");
+    const trigger: PricingTrigger =
+      rawTrigger === "monthly-cutoff" || rawTrigger === "cost-increase"
+        ? rawTrigger
+        : "manual";
+
+    const { source, suggestions } = await buildPriceSuggestions(marketShift, trigger);
+
+    res.json({
+      source,
+      count: suggestions.length,
+      suggestions,
+    });
   }),
 );
 

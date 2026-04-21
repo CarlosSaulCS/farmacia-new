@@ -534,6 +534,19 @@ const moduleOptions: Array<{
   },
 ];
 
+const medicationCategoryOptions = [
+  "Antibioticos",
+  "Cronicos",
+  "Analgesicos y antiinflamatorios",
+  "Alergias y respiratorio",
+  "Gastrointestinal",
+  "Medicamentos generales",
+];
+
+const medicationCategoryRank = new Map(
+  medicationCategoryOptions.map((category, index) => [category, index]),
+);
+
 function MetricTiles({
   items,
   className = "",
@@ -586,7 +599,43 @@ function defaultCategoryForKind(kind: Product["kind"]): string {
   if (kind === "MEDICAL_SERVICE") {
     return "Servicio medico";
   }
-  return "Medicamento";
+  return "Medicamentos generales";
+}
+
+function inferProductCategory(name: string, kind: Product["kind"]): string {
+  if (kind !== "MEDICATION") {
+    return defaultCategoryForKind(kind);
+  }
+
+  const normalized = normalizeText(name);
+  if (/(amoxicilina|azitromicina|ampicilina|cef|cipro|clindamicina|metronidazol)/.test(normalized)) {
+    return "Antibioticos";
+  }
+  if (/(losartan|metformina|enalapril|amlodipino|atorvastatina|glibenclamida|insulina)/.test(normalized)) {
+    return "Cronicos";
+  }
+  if (/(paracetamol|ibuprofeno|diclofenaco|naproxeno|ketorolaco|aspirina)/.test(normalized)) {
+    return "Analgesicos y antiinflamatorios";
+  }
+  if (/(loratadina|cetirizina|salbutamol|ambroxol|dextrometorfano|clorfenamina)/.test(normalized)) {
+    return "Alergias y respiratorio";
+  }
+  if (/(omeprazol|loperamida|butilhioscina|metoclopramida|ranitidina|antiacido)/.test(normalized)) {
+    return "Gastrointestinal";
+  }
+
+  return "Medicamentos generales";
+}
+
+function productCategorySortValue(product: Product): number {
+  if (product.kind === "MEDICAL_SUPPLY") {
+    return medicationCategoryOptions.length + 1;
+  }
+  if (product.kind === "MEDICAL_SERVICE") {
+    return medicationCategoryOptions.length + 2;
+  }
+
+  return medicationCategoryRank.get(product.category ?? "") ?? medicationCategoryOptions.length;
 }
 
 function defaultUnitForKind(kind: Product["kind"]): string {
@@ -907,13 +956,13 @@ function App() {
     minStock: "",
     expiresAt: "",
     lotCode: "",
+    category: "Medicamentos generales",
     description: "",
   });
   const [newProductSkuManuallyEdited, setNewProductSkuManuallyEdited] = useState(false);
   const [newService, setNewService] = useState({
     sku: "",
     name: "",
-    cost: "",
     price: "",
     description: "",
   });
@@ -921,13 +970,11 @@ function App() {
   const [creatingProduct, setCreatingProduct] = useState(false);
   const [creatingService, setCreatingService] = useState(false);
   const [editServiceId, setEditServiceId] = useState("");
-  const [editServiceCost, setEditServiceCost] = useState("");
   const [editServicePrice, setEditServicePrice] = useState("");
   const [editServiceDescription, setEditServiceDescription] = useState("");
   const [editServiceActive, setEditServiceActive] = useState(true);
   const [savingServiceChanges, setSavingServiceChanges] = useState(false);
   const [serviceQuickId, setServiceQuickId] = useState("");
-  const [serviceQuickCost, setServiceQuickCost] = useState("");
   const [serviceQuickPrice, setServiceQuickPrice] = useState("");
   const [updatingServiceQuick, setUpdatingServiceQuick] = useState(false);
 
@@ -943,6 +990,7 @@ function App() {
   const [editProductId, setEditProductId] = useState("");
   const [editProductName, setEditProductName] = useState("");
   const [editCommercialName, setEditCommercialName] = useState("");
+  const [editCategory, setEditCategory] = useState("Medicamentos generales");
   const [editCost, setEditCost] = useState("");
   const [editPrice, setEditPrice] = useState("");
   const [editMinStock, setEditMinStock] = useState("");
@@ -1024,6 +1072,7 @@ function App() {
         lotsData,
         operationsData,
         cashData,
+        priceData,
       ] = await Promise.all([
         apiRequest<DashboardSummary>("/analytics/dashboard"),
         apiRequest<Product[]>("/products"),
@@ -1044,6 +1093,9 @@ function App() {
         apiRequest<InventoryLot[]>("/inventory/lots"),
         apiRequest<{ total: number; alerts: OperationalAlert[] }>("/operations/alerts"),
         apiRequest<CashOverview>("/cash/current"),
+        apiRequest<{ source: "aion" | "local"; suggestions: PriceSuggestion[] }>(
+          `/ai/price-adjustments?marketShift=${marketShift}`,
+        ),
       ]);
 
       setSummary(dashboard);
@@ -1062,13 +1114,15 @@ function App() {
       setInventoryLots(lotsData);
       setOperationalAlerts(operationsData.alerts);
       setCashOverview(cashData);
+      setSuggestions(priceData.suggestions.slice(0, 10));
+      setSuggestionSource(priceData.source);
       setLastSyncAt(new Date());
     } catch (error) {
       showError(error, "No fue posible cargar la informacion principal.");
     } finally {
       setLoadingData(false);
     }
-  }, []);
+  }, [marketShift]);
 
   useEffect(() => {
     void refreshCoreData();
@@ -1125,6 +1179,9 @@ function App() {
 
     setEditProductName(selectedProduct.name);
     setEditCommercialName(selectedProduct.commercialName ?? "");
+    setEditCategory(
+      selectedProduct.category ?? inferProductCategory(selectedProduct.name, selectedProduct.kind),
+    );
     setEditCost(String(selectedProduct.cost));
     setEditPrice(String(selectedProduct.price));
     setEditMinStock(String(selectedProduct.minStock));
@@ -1143,7 +1200,6 @@ function App() {
     }
 
     setEditServicePrice(String(selectedService.price));
-    setEditServiceCost(String(selectedService.cost));
     setEditServiceDescription(selectedService.description ?? "");
     setEditServiceActive(selectedService.isActive);
   }, [editServiceId, services]);
@@ -1158,7 +1214,6 @@ function App() {
       return;
     }
 
-    setServiceQuickCost(String(selectedService.cost));
     setServiceQuickPrice(String(selectedService.price));
   }, [serviceQuickId, services]);
 
@@ -1210,7 +1265,9 @@ function App() {
         return relevance > 0;
       })
       .sort((left, right) =>
-        right.relevance - left.relevance || left.product.name.localeCompare(right.product.name),
+        right.relevance - left.relevance ||
+        productCategorySortValue(left.product) - productCategorySortValue(right.product) ||
+        left.product.name.localeCompare(right.product.name),
       )
       .map(({ product }) => product);
   }, [deferredPosSearch, posItems]);
@@ -1239,7 +1296,9 @@ function App() {
         return relevance > 0;
       })
       .sort((left, right) =>
-        right.relevance - left.relevance || left.product.name.localeCompare(right.product.name),
+        right.relevance - left.relevance ||
+        productCategorySortValue(left.product) - productCategorySortValue(right.product) ||
+        left.product.name.localeCompare(right.product.name),
       )
       .map(({ product }) => product);
   }, [deferredInventoryFilter, products]);
@@ -1523,6 +1582,13 @@ function App() {
 
     setCreatingProduct(true);
     try {
+      const categoryCandidate = newProduct.category.trim();
+      const inferredCategory = inferProductCategory(newProduct.name, kind);
+      const category =
+        kind === "MEDICATION" && categoryCandidate === defaultCategoryForKind(kind)
+          ? inferredCategory
+          : categoryCandidate || inferredCategory;
+
       await apiRequest<Product>("/products", {
         method: "POST",
         body: JSON.stringify({
@@ -1530,7 +1596,7 @@ function App() {
           name: newProduct.name.trim(),
           commercialName: newProduct.commercialName.trim() || undefined,
           kind,
-          category: defaultCategoryForKind(kind),
+          category,
           unit: newProduct.unit.trim() || defaultUnitForKind(kind),
           description: newProduct.description.trim() || undefined,
           cost,
@@ -1555,6 +1621,7 @@ function App() {
         minStock: "",
         expiresAt: "",
         lotCode: "",
+        category: "Medicamentos generales",
         description: "",
       });
       setNewProductSkuManuallyEdited(false);
@@ -1570,22 +1637,13 @@ function App() {
   async function submitNewService(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const cost = parseFloatSafe(newService.cost, NaN);
     const price = parseFloatSafe(newService.price, NaN);
     if (!newService.name.trim()) {
       setNotice({ kind: "error", message: "El nombre del servicio es obligatorio." });
       return;
     }
-    if (Number.isNaN(cost) || cost < 0) {
-      setNotice({ kind: "error", message: "El costo del servicio no es valido." });
-      return;
-    }
     if (Number.isNaN(price) || price <= 0) {
       setNotice({ kind: "error", message: "El precio del servicio debe ser mayor a 0." });
-      return;
-    }
-    if (price < cost) {
-      setNotice({ kind: "error", message: "El precio del servicio no puede ser menor al costo." });
       return;
     }
 
@@ -1600,7 +1658,7 @@ function App() {
           category: "Servicio medico",
           unit: "servicio",
           description: newService.description.trim() || undefined,
-          cost,
+          cost: 0,
           price,
           stock: 0,
           minStock: 0,
@@ -1611,7 +1669,6 @@ function App() {
       setNewService({
         sku: "",
         name: "",
-        cost: "",
         price: "",
         description: "",
       });
@@ -1632,18 +1689,9 @@ function App() {
       return;
     }
 
-    const cost = parseFloatSafe(editServiceCost, NaN);
     const price = parseFloatSafe(editServicePrice, NaN);
-    if (Number.isNaN(cost) || cost < 0) {
-      setNotice({ kind: "error", message: "El costo del servicio editado no es valido." });
-      return;
-    }
     if (Number.isNaN(price) || price <= 0) {
       setNotice({ kind: "error", message: "El precio del servicio editado no es valido." });
-      return;
-    }
-    if (price < cost) {
-      setNotice({ kind: "error", message: "El precio del servicio no puede ser menor al costo." });
       return;
     }
 
@@ -1654,7 +1702,6 @@ function App() {
         body: JSON.stringify({
           kind: "MEDICAL_SERVICE",
           unit: "servicio",
-          cost,
           price,
           description: editServiceDescription.trim() || null,
           isActive: editServiceActive,
@@ -1796,26 +1843,16 @@ function App() {
       return;
     }
 
-    const hasCost = serviceQuickCost.trim().length > 0;
     const hasPrice = serviceQuickPrice.trim().length > 0;
-    if (!hasCost && !hasPrice) {
-      setNotice({ kind: "error", message: "Ingresa costo o precio para actualizar el servicio." });
+    if (!hasPrice) {
+      setNotice({ kind: "error", message: "Ingresa el precio para actualizar el servicio." });
       return;
     }
 
-    const cost = hasCost ? parseFloatSafe(serviceQuickCost, NaN) : selectedService.cost;
-    const price = hasPrice ? parseFloatSafe(serviceQuickPrice, NaN) : selectedService.price;
+    const price = parseFloatSafe(serviceQuickPrice, NaN);
 
-    if (Number.isNaN(cost) || cost < 0) {
-      setNotice({ kind: "error", message: "El costo rapido del servicio no es valido." });
-      return;
-    }
     if (Number.isNaN(price) || price <= 0) {
       setNotice({ kind: "error", message: "El precio rapido del servicio no es valido." });
-      return;
-    }
-    if (price < cost) {
-      setNotice({ kind: "error", message: "El precio del servicio no puede quedar menor al costo." });
       return;
     }
 
@@ -1826,7 +1863,6 @@ function App() {
         body: JSON.stringify({
           kind: "MEDICAL_SERVICE",
           unit: "servicio",
-          cost,
           price,
         }),
       });
@@ -1893,6 +1929,13 @@ function App() {
     }
 
     const costIncreased = cost > selectedProduct.cost;
+    const categoryCandidate = editCategory.trim();
+    const category =
+      selectedProduct.kind === "MEDICATION" &&
+      (categoryCandidate === defaultCategoryForKind(selectedProduct.kind) ||
+        categoryCandidate === "Medicamento")
+        ? inferProductCategory(productName, selectedProduct.kind)
+        : categoryCandidate || inferProductCategory(productName, selectedProduct.kind);
 
     setSavingProductChanges(true);
     try {
@@ -1906,6 +1949,7 @@ function App() {
         body: JSON.stringify({
           name: productName,
           commercialName: editCommercialName.trim() || null,
+          category,
           cost,
           price,
           minStock,
@@ -3120,9 +3164,23 @@ function App() {
                     <input
                       id="new-name"
                       value={newProduct.name}
-                      onChange={(event) =>
-                        setNewProduct((current) => ({ ...current, name: event.target.value }))
-                      }
+                      onChange={(event) => {
+                        const nextName = event.target.value;
+                        setNewProduct((current) => {
+                          const wasAutomaticCategory =
+                            current.category === inferProductCategory(current.name, current.kind) ||
+                            current.category === defaultCategoryForKind(current.kind);
+
+                          return {
+                            ...current,
+                            name: nextName,
+                            category:
+                              current.kind === "MEDICATION" && wasAutomaticCategory
+                                ? inferProductCategory(nextName, current.kind)
+                                : current.category,
+                          };
+                        });
+                      }}
                       placeholder="Paracetamol 500mg"
                     />
                   </div>
@@ -3154,6 +3212,10 @@ function App() {
                         setNewProduct((current) => ({
                           ...current,
                           kind,
+                          category:
+                            kind === "MEDICATION"
+                              ? inferProductCategory(current.name, kind)
+                              : defaultCategoryForKind(kind),
                           unit: defaultUnitForKind(kind),
                           expiresAt:
                             kind === "MEDICATION" ? current.expiresAt : "",
@@ -3174,6 +3236,33 @@ function App() {
                       }
                     />
                   </div>
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="new-category">Categoria operativa</label>
+                  <select
+                    id="new-category"
+                    value={newProduct.category}
+                    onChange={(event) =>
+                      setNewProduct((current) => ({
+                        ...current,
+                        category: event.target.value,
+                      }))
+                    }
+                    disabled={newProduct.kind !== "MEDICATION"}
+                  >
+                    {newProduct.kind === "MEDICATION" ? (
+                      medicationCategoryOptions.map((category) => (
+                        <option key={category} value={category}>
+                          {category}
+                        </option>
+                      ))
+                    ) : (
+                      <option value={defaultCategoryForKind(newProduct.kind)}>
+                        {defaultCategoryForKind(newProduct.kind)}
+                      </option>
+                    )}
+                  </select>
                 </div>
 
                 <div className="field-grid two-col">
@@ -3431,6 +3520,7 @@ function App() {
                   <thead>
                     <tr>
                       <th>Producto</th>
+                      <th>Categoria</th>
                       <th>Tipo</th>
                       <th>SKU</th>
                       <th>Stock</th>
@@ -3445,6 +3535,7 @@ function App() {
                     {filteredInventory.map((product) => (
                       <tr key={product.id}>
                         <td>{formatProductLabel(product.name, product.commercialName)}</td>
+                        <td>{product.category ?? defaultCategoryForKind(product.kind)}</td>
                         <td>{productKindLabel(product.kind)}</td>
                         <td>{product.sku}</td>
                         <td>{product.stock}</td>
@@ -3461,7 +3552,7 @@ function App() {
                     ))}
                     {filteredInventory.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="empty-cell">
+                        <td colSpan={10} className="empty-cell">
                           No hay coincidencias.
                         </td>
                       </tr>
@@ -3501,7 +3592,23 @@ function App() {
                     <input
                       id="edit-product-name"
                       value={editProductName}
-                      onChange={(event) => setEditProductName(event.target.value)}
+                      onChange={(event) => {
+                        const nextName = event.target.value;
+                        if (selectedEditProduct?.kind === "MEDICATION") {
+                          const wasAutomaticCategory =
+                            editCategory ===
+                              inferProductCategory(editProductName, selectedEditProduct.kind) ||
+                            editCategory === defaultCategoryForKind(selectedEditProduct.kind) ||
+                            editCategory === "Medicamento";
+
+                          if (wasAutomaticCategory) {
+                            setEditCategory(
+                              inferProductCategory(nextName, selectedEditProduct.kind),
+                            );
+                          }
+                        }
+                        setEditProductName(nextName);
+                      }}
                       placeholder="Paracetamol 500 mg, Amoxicilina 500 mg..."
                     />
                   </div>
@@ -3514,6 +3621,28 @@ function App() {
                       onChange={(event) => setEditCommercialName(event.target.value)}
                       placeholder="Tempra, Advil, etc."
                     />
+                  </div>
+
+                  <div className="field-group">
+                    <label htmlFor="edit-category">Categoria operativa</label>
+                    <select
+                      id="edit-category"
+                      value={editCategory}
+                      onChange={(event) => setEditCategory(event.target.value)}
+                      disabled={selectedEditProduct?.kind !== "MEDICATION"}
+                    >
+                      {selectedEditProduct?.kind === "MEDICATION" ? (
+                        medicationCategoryOptions.map((category) => (
+                          <option key={category} value={category}>
+                            {category}
+                          </option>
+                        ))
+                      ) : (
+                        <option value={defaultCategoryForKind(selectedEditProduct?.kind ?? "MEDICAL_SUPPLY")}>
+                          {defaultCategoryForKind(selectedEditProduct?.kind ?? "MEDICAL_SUPPLY")}
+                        </option>
+                      )}
+                    </select>
                   </div>
 
                   <div className="field-grid two-col">
@@ -3698,39 +3827,21 @@ function App() {
                   </div>
                 </div>
 
-                <div className="field-grid two-col">
-                  <div className="field-group">
-                    <label htmlFor="new-service-cost">Costo</label>
-                    <input
-                      id="new-service-cost"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={newService.cost}
-                      onChange={(event) =>
-                        setNewService((current) => ({
-                          ...current,
-                          cost: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="field-group">
-                    <label htmlFor="new-service-price">Precio Al Publico</label>
-                    <input
-                      id="new-service-price"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={newService.price}
-                      onChange={(event) =>
-                        setNewService((current) => ({
-                          ...current,
-                          price: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
+                <div className="field-group">
+                  <label htmlFor="new-service-price">Precio al publico</label>
+                  <input
+                    id="new-service-price"
+                    type="number"
+                    min={0}
+                    step="0.01"
+                    value={newService.price}
+                    onChange={(event) =>
+                      setNewService((current) => ({
+                        ...current,
+                        price: event.target.value,
+                      }))
+                    }
+                  />
                 </div>
 
                 <div className="field-group">
@@ -3754,7 +3865,7 @@ function App() {
               </form>
 
               <details className="compact-details">
-                <summary>Ajustar costo o precio</summary>
+                <summary>Ajustar precio</summary>
                 <form className="field-grid details-content" onSubmit={submitQuickServiceUpdate}>
                   <div className="field-group">
                     <label htmlFor="quick-service">Servicio</label>
@@ -3771,29 +3882,16 @@ function App() {
                     </select>
                   </div>
 
-                  <div className="field-grid two-col">
-                    <div className="field-group">
-                      <label htmlFor="quick-service-cost">Costo</label>
-                      <input
-                        id="quick-service-cost"
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={serviceQuickCost}
-                        onChange={(event) => setServiceQuickCost(event.target.value)}
-                      />
-                    </div>
-                    <div className="field-group">
-                      <label htmlFor="quick-service-price">Precio Al Publico</label>
-                      <input
-                        id="quick-service-price"
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={serviceQuickPrice}
-                        onChange={(event) => setServiceQuickPrice(event.target.value)}
-                      />
-                    </div>
+                  <div className="field-group">
+                    <label htmlFor="quick-service-price">Precio al publico</label>
+                    <input
+                      id="quick-service-price"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={serviceQuickPrice}
+                      onChange={(event) => setServiceQuickPrice(event.target.value)}
+                    />
                   </div>
 
                   {selectedQuickService && (
@@ -3832,29 +3930,16 @@ function App() {
                     </p>
                   )}
 
-                  <div className="field-grid two-col">
-                    <div className="field-group">
-                      <label htmlFor="edit-service-cost">Costo</label>
-                      <input
-                        id="edit-service-cost"
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={editServiceCost}
-                        onChange={(event) => setEditServiceCost(event.target.value)}
-                      />
-                    </div>
-                    <div className="field-group">
-                      <label htmlFor="edit-service-price">Precio Al Publico</label>
-                      <input
-                        id="edit-service-price"
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={editServicePrice}
-                        onChange={(event) => setEditServicePrice(event.target.value)}
-                      />
-                    </div>
+                  <div className="field-group">
+                    <label htmlFor="edit-service-price">Precio al publico</label>
+                    <input
+                      id="edit-service-price"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={editServicePrice}
+                      onChange={(event) => setEditServicePrice(event.target.value)}
+                    />
                   </div>
 
                   <div className="field-group">
