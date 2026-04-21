@@ -1293,6 +1293,165 @@ function startAutomaticBackups() {
 }
 
 async function ensureSchemaCompatibility() {
+  const baseSchemaStatements = [
+    `CREATE TABLE IF NOT EXISTS "Product" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "sku" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "commercialName" TEXT,
+      "kind" TEXT NOT NULL DEFAULT 'MEDICATION',
+      "description" TEXT,
+      "category" TEXT,
+      "unit" TEXT NOT NULL DEFAULT 'unidad',
+      "cost" REAL NOT NULL DEFAULT 0,
+      "price" REAL NOT NULL,
+      "stock" INTEGER NOT NULL DEFAULT 0,
+      "minStock" INTEGER NOT NULL DEFAULT 0,
+      "expiresAt" DATETIME,
+      "isActive" BOOLEAN NOT NULL DEFAULT true,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS "Product_sku_key" ON "Product"("sku")',
+    `CREATE TABLE IF NOT EXISTS "Sale" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "customerName" TEXT,
+      "notes" TEXT,
+      "subtotal" REAL NOT NULL,
+      "discount" REAL NOT NULL DEFAULT 0,
+      "total" REAL NOT NULL,
+      "amountPaid" REAL,
+      "changeGiven" REAL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Patient" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "fullName" TEXT NOT NULL,
+      "phone" TEXT,
+      "notes" TEXT,
+      "lastVisitAt" DATETIME,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "Patient_fullName_idx" ON "Patient"("fullName")',
+    `CREATE TABLE IF NOT EXISTS "Appointment" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "patientId" INTEGER,
+      "patientName" TEXT NOT NULL,
+      "patientPhone" TEXT,
+      "serviceType" TEXT NOT NULL,
+      "notes" TEXT,
+      "appointmentAt" DATETIME NOT NULL,
+      "status" TEXT NOT NULL DEFAULT 'SCHEDULED',
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "Appointment_appointmentAt_status_idx" ON "Appointment"("appointmentAt","status")',
+    'CREATE INDEX IF NOT EXISTS "Appointment_patientId_idx" ON "Appointment"("patientId")',
+    `CREATE TABLE IF NOT EXISTS "SaleItem" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "saleId" INTEGER NOT NULL,
+      "productId" INTEGER NOT NULL,
+      "quantity" INTEGER NOT NULL,
+      "unitPrice" REAL NOT NULL,
+      "lineTotal" REAL NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS "Consultation" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "patientId" INTEGER NOT NULL,
+      "appointmentId" INTEGER,
+      "serviceProductId" INTEGER,
+      "serviceType" TEXT NOT NULL,
+      "summary" TEXT,
+      "diagnosis" TEXT,
+      "treatment" TEXT,
+      "observations" TEXT,
+      "followUpAt" DATETIME,
+      "followUpStatus" TEXT NOT NULL DEFAULT 'NONE',
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS "Consultation_appointmentId_key" ON "Consultation"("appointmentId")',
+    'CREATE INDEX IF NOT EXISTS "Consultation_patientId_createdAt_idx" ON "Consultation"("patientId","createdAt")',
+    'CREATE INDEX IF NOT EXISTS "Consultation_followUpAt_followUpStatus_idx" ON "Consultation"("followUpAt","followUpStatus")',
+    `CREATE TABLE IF NOT EXISTS "InventoryMovement" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "change" INTEGER NOT NULL,
+      "reason" TEXT NOT NULL,
+      "lotCode" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS "ProductCostEvent" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "previousCost" REAL NOT NULL,
+      "newCost" REAL NOT NULL,
+      "changePct" REAL NOT NULL,
+      "reason" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS "ProductPriceEvent" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "previousPrice" REAL NOT NULL,
+      "newPrice" REAL NOT NULL,
+      "changePct" REAL NOT NULL,
+      "reason" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS "InventoryLot" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "lotCode" TEXT NOT NULL,
+      "expiresAt" DATETIME,
+      "quantity" INTEGER NOT NULL DEFAULT 0,
+      "cost" REAL NOT NULL DEFAULT 0,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS "InventoryLot_productId_lotCode_key" ON "InventoryLot"("productId","lotCode")',
+    'CREATE INDEX IF NOT EXISTS "InventoryLot_productId_expiresAt_idx" ON "InventoryLot"("productId","expiresAt")',
+    `CREATE TABLE IF NOT EXISTS "CashSession" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "status" TEXT NOT NULL DEFAULT 'OPEN',
+      "openingAmount" REAL NOT NULL DEFAULT 0,
+      "expectedAmount" REAL NOT NULL DEFAULT 0,
+      "countedAmount" REAL,
+      "difference" REAL,
+      "notes" TEXT,
+      "openedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "closedAt" DATETIME
+    )`,
+    'CREATE INDEX IF NOT EXISTS "CashSession_status_openedAt_idx" ON "CashSession"("status","openedAt")',
+    `CREATE TABLE IF NOT EXISTS "CashMovement" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "sessionId" INTEGER NOT NULL,
+      "saleId" INTEGER,
+      "type" TEXT NOT NULL,
+      "amount" REAL NOT NULL,
+      "reason" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "CashMovement_sessionId_createdAt_idx" ON "CashMovement"("sessionId","createdAt")',
+    `CREATE TABLE IF NOT EXISTS "AuditLog" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "entityType" TEXT NOT NULL,
+      "entityId" INTEGER,
+      "action" TEXT NOT NULL,
+      "message" TEXT NOT NULL,
+      "payload" JSONB,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "AuditLog_entityType_createdAt_idx" ON "AuditLog"("entityType","createdAt")',
+    `CREATE TABLE IF NOT EXISTS "AiSuggestion" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "suggestionType" TEXT NOT NULL,
+      "payload" JSONB NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+  ];
+
   const compatibilityStatements = [
     'ALTER TABLE "Product" ADD COLUMN "commercialName" TEXT',
     'ALTER TABLE "Sale" ADD COLUMN "amountPaid" REAL',
@@ -1384,6 +1543,10 @@ async function ensureSchemaCompatibility() {
     'CREATE INDEX IF NOT EXISTS "Appointment_appointmentAt_status_idx" ON "Appointment"("appointmentAt","status")',
     'CREATE INDEX IF NOT EXISTS "Appointment_patientId_idx" ON "Appointment"("patientId")',
   ];
+
+  for (const statement of baseSchemaStatements) {
+    await prisma.$executeRawUnsafe(statement);
+  }
 
   for (const statement of compatibilityStatements) {
     try {

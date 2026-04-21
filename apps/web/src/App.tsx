@@ -14,7 +14,7 @@ const defaultApiBaseUrl =
     ? "http://127.0.0.1:4000/api"
     : "http://localhost:4000/api";
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? defaultApiBaseUrl;
-const brandLogoUrl = `${import.meta.env.BASE_URL}brand-logo.png`;
+const brandLogoUrl = `${import.meta.env.BASE_URL}logo.png`;
 
 type ModuleKey =
   | "dashboard"

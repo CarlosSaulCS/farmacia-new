@@ -102,13 +102,15 @@
 }
 
 .brand-logo {
-  width: 58px;
+  width: 76px;
   height: 58px;
-  border-radius: 16px;
+  border-radius: 18px;
   background: #f4f8fb;
   border: 1px solid rgba(120, 144, 167, 0.16);
   box-shadow: var(--shadow-sm);
-  padding: 10px;
+  object-fit: cover;
+  object-position: center;
+  padding: 0;
   flex-shrink: 0;
 }
 

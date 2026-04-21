@@ -19,9 +19,7 @@
       "from": "../web/dist",
       "to": "web",
       "filter": [
-        "**/*",
-        "!**/logo 1.png",
-        "!**/logo.png"
+        "**/*"
       ]
     },
     {
