@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
+import {
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import "./App.css";
-import brandLogo from "./assets/brand-logo.png";
 
 const defaultApiBaseUrl =
   window.location.protocol === "file:"
     ? "http://127.0.0.1:4000/api"
     : "http://localhost:4000/api";
 const API_BASE_URL = import.meta.env.VITE_API_URL ?? defaultApiBaseUrl;
+const brandLogoUrl = `${import.meta.env.BASE_URL}brand-logo.png`;
 
 type ModuleKey =
   | "dashboard"
@@ -58,11 +64,136 @@ type Sale = {
 
 type Appointment = {
   id: number;
+  patientId?: number | null;
   patientName: string;
+  patientPhone?: string | null;
   serviceType: string;
   notes?: string | null;
   appointmentAt: string;
   status: "SCHEDULED" | "COMPLETED" | "CANCELLED";
+  consultation?: {
+    id: number;
+    followUpAt?: string | null;
+    followUpStatus?: "NONE" | "PENDING" | "COMPLETED" | "CANCELLED";
+  } | null;
+};
+
+type Patient = {
+  id: number;
+  fullName: string;
+  phone?: string | null;
+  notes?: string | null;
+  lastVisitAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type Consultation = {
+  id: number;
+  patientId: number;
+  appointmentId?: number | null;
+  serviceProductId?: number | null;
+  serviceType: string;
+  summary?: string | null;
+  diagnosis?: string | null;
+  treatment?: string | null;
+  observations?: string | null;
+  followUpAt?: string | null;
+  followUpStatus: "NONE" | "PENDING" | "COMPLETED" | "CANCELLED";
+  createdAt: string;
+  updatedAt: string;
+  patient: Patient;
+  appointment?: Appointment | null;
+  serviceProduct?: Product | null;
+};
+
+type PendingFollowUp = {
+  id: number;
+  patientId: number;
+  patientName: string;
+  patientPhone?: string | null;
+  serviceType: string;
+  followUpAt?: string | null;
+  status: "NONE" | "PENDING" | "COMPLETED" | "CANCELLED";
+  summary?: string | null;
+  appointmentId?: number | null;
+};
+
+type CashMovement = {
+  id: number;
+  sessionId: number;
+  saleId?: number | null;
+  type: "OPENING" | "SALE" | "INCOME" | "EXPENSE" | "ADJUSTMENT" | "CLOSING";
+  amount: number;
+  reason: string;
+  createdAt: string;
+};
+
+type CashSession = {
+  id: number;
+  status: "OPEN" | "CLOSED";
+  openingAmount: number;
+  expectedAmount: number;
+  countedAmount?: number | null;
+  difference?: number | null;
+  notes?: string | null;
+  openedAt: string;
+  closedAt?: string | null;
+  movements: CashMovement[];
+};
+
+type CashOverview = {
+  openSession: CashSession | null;
+  lastClosedSession: CashSession | null;
+};
+
+type OperationalAlert = {
+  id: string;
+  type:
+    | "LOW_STOCK"
+    | "OUT_OF_STOCK"
+    | "EXPIRING"
+    | "UPCOMING_APPOINTMENT"
+    | "FOLLOW_UP"
+    | "LOW_ROTATION"
+    | "CASH_MISMATCH"
+    | "SALES_ANOMALY";
+  level: "info" | "warning" | "critical";
+  title: string;
+  message: string;
+  module: "inventory" | "appointments" | "reports" | "pos";
+  entityId?: number;
+  entityType?: string;
+};
+
+type AuditLogEntry = {
+  id: number;
+  entityType: string;
+  entityId?: number | null;
+  action: string;
+  message: string;
+  payload?: unknown;
+  createdAt: string;
+};
+
+type InventoryLot = {
+  id: number;
+  productId: number;
+  lotCode: string;
+  expiresAt?: string | null;
+  quantity: number;
+  cost: number;
+  createdAt: string;
+  updatedAt: string;
+  product: Pick<Product, "id" | "sku" | "name" | "commercialName" | "kind">;
+};
+
+type AssistantResponse = {
+  topic: string;
+  title: string;
+  summary: string;
+  bullets: string[];
+  records?: unknown;
 };
 
 type DashboardSummary = {
@@ -74,6 +205,11 @@ type DashboardSummary = {
   lowStockProducts: number;
   openAppointments: number;
   nextAppointments: Appointment[];
+  pendingFollowUpsCount?: number;
+  pendingFollowUps?: PendingFollowUp[];
+  openCashSession?: CashSession | null;
+  lastClosedCashSession?: CashSession | null;
+  operationalAlerts?: OperationalAlert[];
 };
 
 type InventoryAlert = {
@@ -90,10 +226,13 @@ type InventoryAlert = {
 
 type ExpiryAlert = {
   id: number;
+  productId?: number;
   sku: string;
   name: string;
   commercialName: string | null;
   category: string | null;
+  lotCode?: string;
+  quantity?: number;
   expiresAt: string;
   daysToExpire: number;
   status: "EXPIRED" | "EXPIRING_SOON";
@@ -159,6 +298,17 @@ type SalesReport = {
   estimatedGrossProfit: number;
   estimatedMarginPct: number;
   averageTicket: number;
+  dailySales: Array<{
+    date: string;
+    totalRevenue: number;
+    totalSales: number;
+  }>;
+  anomalies: Array<{
+    type: "SPIKE" | "DROP" | "DISCOUNT" | "LOW_ACTIVITY";
+    message: string;
+    severity: "info" | "warning" | "critical";
+  }>;
+  highlights: string[];
   topProducts: SalesReportTopProduct[];
   bestSellingProducts: SalesProductPerformance[];
   leastSellingProducts: SalesProductPerformance[];
@@ -175,6 +325,7 @@ type InventoryMovementReportItem = {
   productCommercialName?: string | null;
   change: number;
   reason: string;
+  lotCode?: string | null;
   createdAt: string;
   currentStock: number;
   minStock: number;
@@ -187,6 +338,7 @@ type ReorderItem = {
   sku: string;
   name: string;
   commercialName?: string | null;
+  kind: Product["kind"];
   category: string | null;
   stock: number;
   minStock: number;
@@ -195,6 +347,7 @@ type ReorderItem = {
   soldInPeriod: number;
   dailyVelocity: number;
   priority: ReorderPriority;
+  criticalityScore: number;
 };
 
 type ReorderReport = {
@@ -207,6 +360,7 @@ type ReorderReport = {
   coverageDays: number;
   totalItems: number;
   totalUnitsSuggested: number;
+  highlights: string[];
   items: ReorderItem[];
 };
 
@@ -223,6 +377,13 @@ type CartItem = {
   quantity: number;
   unitPrice: number;
   maxStock: number;
+};
+
+type MetricTile = {
+  label: string;
+  value: string;
+  helper: string;
+  tone?: "accent" | "success" | "warning" | "neutral";
 };
 
 const moneyFormatter = new Intl.NumberFormat("es-MX", {
@@ -248,7 +409,12 @@ function formatProductLabel(name: string, commercialName?: string | null): strin
   return normalizedCommercialName ? `${name} (${normalizedCommercialName})` : name;
 }
 
-function exportRestockReportPdf(report: ReorderReport): void {
+async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
+  const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+    import("jspdf"),
+    import("jspdf-autotable"),
+  ]);
+
   const doc = new jsPDF({
     orientation: "landscape",
     unit: "pt",
@@ -326,15 +492,72 @@ function exportRestockReportPdf(report: ReorderReport): void {
   doc.save(`reporte-surtido-${fileDate}.pdf`);
 }
 
-const moduleOptions: Array<{ key: ModuleKey; label: string }> = [
-  { key: "dashboard", label: "Centro" },
-  { key: "pos", label: "Punto De Venta" },
-  { key: "inventory", label: "Inventario" },
-  { key: "services", label: "Servicios" },
-  { key: "alerts", label: "Alertas" },
-  { key: "appointments", label: "Citas" },
-  { key: "reports", label: "Reportes" },
+const moduleOptions: Array<{
+  key: ModuleKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "dashboard",
+    label: "Centro",
+    description: "Estado operativo, ventas y lectura inteligente.",
+  },
+  {
+    key: "pos",
+    label: "Punto De Venta",
+    description: "Cobro rapido con ticket, cambio y servicios.",
+  },
+  {
+    key: "inventory",
+    label: "Inventario",
+    description: "Altas, ajustes y control de surtido con caducidad.",
+  },
+  {
+    key: "services",
+    label: "Servicios",
+    description: "Servicios usados en POS y agenda clinica.",
+  },
+  {
+    key: "alerts",
+    label: "Alertas",
+    description: "Faltantes y proximos vencimientos en un solo lugar.",
+  },
+  {
+    key: "appointments",
+    label: "Citas",
+    description: "Programacion, seguimiento y cambio de estados.",
+  },
+  {
+    key: "reports",
+    label: "Reportes",
+    description: "Ventas, surtido, exportaciones y respaldo local.",
+  },
 ];
+
+function MetricTiles({
+  items,
+  className = "",
+}: {
+  items: MetricTile[];
+  className?: string;
+}) {
+  const classes = ["kpi-grid", className].filter(Boolean).join(" ");
+
+  return (
+    <div className={classes}>
+      {items.map((item) => (
+        <article
+          key={item.label}
+          className={`kpi-card ${item.tone ? `tone-${item.tone}` : ""}`}
+        >
+          <p className="kpi-label">{item.label}</p>
+          <p className="kpi-value">{item.value}</p>
+          <p className="kpi-helper">{item.helper}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
 
 function productKindLabel(kind: Product["kind"]): string {
   if (kind === "MEDICAL_SUPPLY") {
@@ -344,6 +567,16 @@ function productKindLabel(kind: Product["kind"]): string {
     return "Servicio medico";
   }
   return "Medicamento";
+}
+
+function appointmentStatusLabel(status: Appointment["status"]): string {
+  if (status === "COMPLETED") {
+    return "Completada";
+  }
+  if (status === "CANCELLED") {
+    return "Cancelada";
+  }
+  return "Programada";
 }
 
 function defaultCategoryForKind(kind: Product["kind"]): string {
@@ -408,7 +641,154 @@ function generateSkuSuggestion(name: string, kind: Product["kind"]): string {
 }
 
 function normalizeText(value: string): string {
-  return value.toLowerCase().trim();
+  return stripDiacritics(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function uniqueTokens(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+  if (!left) {
+    return right.length;
+  }
+  if (!right) {
+    return left.length;
+  }
+
+  const previous = new Array<number>(right.length + 1).fill(0);
+  const current = new Array<number>(right.length + 1).fill(0);
+
+  for (let j = 0; j <= right.length; j += 1) {
+    previous[j] = j;
+  }
+
+  for (let i = 1; i <= left.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+    for (let j = 0; j <= right.length; j += 1) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[right.length];
+}
+
+function inferSmartSearchIntent(query: string) {
+  const normalized = normalizeText(query);
+  const tokens = uniqueTokens(normalized.split(" "));
+  const aliases = new Set<string>(tokens);
+  const dictionary: Record<string, string[]> = {
+    surtir: ["reabasto", "reponer", "faltante"],
+    agotado: ["sin stock"],
+    antibiotico: ["amoxicilina", "azitromicina"],
+    curacion: ["gasas", "alcohol", "guantes", "jeringa", "inyeccion"],
+    caducidad: ["caduca", "vencido", "vencimiento"],
+    servicio: ["consulta", "curacion", "nebulizacion"],
+  };
+
+  for (const token of tokens) {
+    for (const alias of dictionary[token] ?? []) {
+      aliases.add(alias);
+    }
+  }
+
+  return {
+    wantsRestock:
+      tokens.includes("surtir") || tokens.includes("reabasto") || tokens.includes("faltante"),
+    wantsOutOfStock:
+      tokens.includes("agotado") || (tokens.includes("sin") && tokens.includes("stock")),
+    wantsServices:
+      tokens.includes("servicio") || tokens.includes("consulta") || tokens.includes("curacion"),
+    wantsExpiring:
+      tokens.includes("caducidad") || tokens.includes("vencido") || tokens.includes("caduca"),
+    aliases: [...aliases],
+  };
+}
+
+function scoreProductMatch(product: Product, query: string): number {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const intent = inferSmartSearchIntent(query);
+  const haystack = uniqueTokens([
+    normalizeText(product.name),
+    normalizeText(product.commercialName ?? ""),
+    normalizeText(product.sku),
+    normalizeText(product.category ?? ""),
+    normalizeText(productKindLabel(product.kind)),
+  ]);
+  const joined = haystack.join(" ");
+
+  let score = 0;
+  if (joined.startsWith(normalizedQuery)) score += 10;
+  if (joined.includes(normalizedQuery)) score += 6;
+
+  for (const token of intent.aliases) {
+    if (!token) {
+      continue;
+    }
+    if (joined.includes(token)) score += 3;
+
+    for (const hay of haystack) {
+      for (const candidate of hay.split(" ").filter(Boolean)) {
+        if (candidate.length >= 4 && token.length >= 4 && levenshteinDistance(candidate, token) <= 1) {
+          score += 2;
+          break;
+        }
+      }
+    }
+  }
+
+  if (intent.wantsRestock && product.kind !== "MEDICAL_SERVICE" && product.stock <= product.minStock) {
+    score += 10;
+  }
+  if (intent.wantsOutOfStock && product.kind !== "MEDICAL_SERVICE" && product.stock === 0) {
+    score += 12;
+  }
+  if (intent.wantsServices && product.kind === "MEDICAL_SERVICE") {
+    score += 9;
+  }
+  if (intent.wantsExpiring && Boolean(product.expiresAt)) {
+    score += 6;
+  }
+
+  return score;
+}
+
+function scorePatientMatch(patient: Patient, query: string): number {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const haystack = `${normalizeText(patient.fullName)} ${normalizeText(patient.phone ?? "")} ${normalizeText(patient.notes ?? "")}`.trim();
+  if (haystack.includes(normalizedQuery)) {
+    return 8;
+  }
+
+  return haystack
+    .split(" ")
+    .filter(Boolean)
+    .some((token) => token.length >= 4 && levenshteinDistance(token, normalizedQuery) <= 1)
+    ? 4
+    : 0;
 }
 
 function localDateTimeValue(date: Date): string {
@@ -476,14 +856,26 @@ function App() {
   const [alerts, setAlerts] = useState<InventoryAlert[]>([]);
   const [expiryAlerts, setExpiryAlerts] = useState<ExpiryAlert[]>([]);
   const [expirationThresholdDays, setExpirationThresholdDays] = useState(45);
+  const [appointmentReminderMinutes, setAppointmentReminderMinutes] = useState(60);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
-  const [sales, setSales] = useState<Sale[]>([]);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [consultations, setConsultations] = useState<Consultation[]>([]);
+  const [inventoryLots, setInventoryLots] = useState<InventoryLot[]>([]);
+  const [operationalAlerts, setOperationalAlerts] = useState<OperationalAlert[]>([]);
+  const [cashOverview, setCashOverview] = useState<CashOverview>({
+    openSession: null,
+    lastClosedSession: null,
+  });
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
   const [insights, setInsights] = useState<string[]>([]);
   const [insightSource, setInsightSource] = useState<"aion" | "local">("local");
   const [marketShift, setMarketShift] = useState(0);
   const [suggestions, setSuggestions] = useState<PriceSuggestion[]>([]);
   const [suggestionSource, setSuggestionSource] = useState<"aion" | "local">("local");
+  const [assistantQuery, setAssistantQuery] = useState("");
+  const [assistantResponse, setAssistantResponse] = useState<AssistantResponse | null>(null);
+  const [runningAssistant, setRunningAssistant] = useState(false);
 
   const [posSearch, setPosSearch] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -492,6 +884,14 @@ function App() {
   const [saleDiscountPercent, setSaleDiscountPercent] = useState("0");
   const [amountPaid, setAmountPaid] = useState("");
   const [submittingSale, setSubmittingSale] = useState(false);
+  const [cashOpeningAmount, setCashOpeningAmount] = useState("0");
+  const [cashOpeningNotes, setCashOpeningNotes] = useState("");
+  const [cashMovementType, setCashMovementType] = useState<"INCOME" | "EXPENSE" | "ADJUSTMENT">("INCOME");
+  const [cashMovementAmount, setCashMovementAmount] = useState("");
+  const [cashMovementReason, setCashMovementReason] = useState("");
+  const [cashCountedAmount, setCashCountedAmount] = useState("");
+  const [cashClosingNotes, setCashClosingNotes] = useState("");
+  const [processingCash, setProcessingCash] = useState(false);
 
   const [inventoryFilter, setInventoryFilter] = useState("");
   const [serviceFilter, setServiceFilter] = useState("");
@@ -506,6 +906,7 @@ function App() {
     stock: "",
     minStock: "",
     expiresAt: "",
+    lotCode: "",
     description: "",
   });
   const [newProductSkuManuallyEdited, setNewProductSkuManuallyEdited] = useState(false);
@@ -534,6 +935,8 @@ function App() {
   const [stockCost, setStockCost] = useState("");
   const [stockChange, setStockChange] = useState("");
   const [stockReason, setStockReason] = useState("Ajuste rapido");
+  const [stockLotCode, setStockLotCode] = useState("");
+  const [stockLotExpiresAt, setStockLotExpiresAt] = useState("");
   const [adjustingStock, setAdjustingStock] = useState(false);
 
   const [editProductId, setEditProductId] = useState("");
@@ -554,11 +957,25 @@ function App() {
   );
   const [appointmentForm, setAppointmentForm] = useState({
     patientName: "",
+    patientPhone: "",
     serviceType: "Consulta General",
     appointmentAt: localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)),
     notes: "",
   });
   const [savingAppointment, setSavingAppointment] = useState(false);
+  const [patientSearch, setPatientSearch] = useState("");
+  const [consultationForm, setConsultationForm] = useState({
+    patientId: "",
+    appointmentId: "",
+    serviceProductId: "",
+    serviceType: "Consulta General",
+    summary: "",
+    diagnosis: "",
+    treatment: "",
+    observations: "",
+    followUpAt: "",
+  });
+  const [savingConsultation, setSavingConsultation] = useState(false);
 
   const [reportRange, setReportRange] = useState({
     from: localDateValue(daysAgo(30)),
@@ -573,8 +990,13 @@ function App() {
   const [inventoryMovementsReport, setInventoryMovementsReport] = useState<
     InventoryMovementReportItem[]
   >([]);
+  const [lastReportsLoadedAt, setLastReportsLoadedAt] = useState<Date | null>(null);
   const [lastBackupPath, setLastBackupPath] = useState("");
   const [lastSyncAt, setLastSyncAt] = useState<Date | null>(null);
+
+  const deferredPosSearch = useDeferredValue(posSearch);
+  const deferredInventoryFilter = useDeferredValue(inventoryFilter);
+  const deferredServiceFilter = useDeferredValue(serviceFilter);
 
   function showError(error: unknown, fallback: string) {
     setNotice({
@@ -593,8 +1015,12 @@ function App() {
         posCatalog,
         inventoryAlerts,
         appointmentData,
-        recentSales,
         aiInsights,
+        patientsData,
+        consultationsData,
+        lotsData,
+        operationsData,
+        cashData,
       ] = await Promise.all([
         apiRequest<DashboardSummary>("/analytics/dashboard"),
         apiRequest<Product[]>("/products"),
@@ -604,12 +1030,17 @@ function App() {
           alerts: InventoryAlert[];
           expiringAlerts: ExpiryAlert[];
           expirationThresholdDays: number;
+          appointmentReminderMinutes?: number;
         }>("/inventory/alerts"),
         apiRequest<Appointment[]>("/appointments"),
-        apiRequest<Sale[]>("/sales"),
         apiRequest<{ source: "aion" | "local"; insights: string[] }>(
           "/ai/business-insights",
         ),
+        apiRequest<Patient[]>("/patients"),
+        apiRequest<Consultation[]>("/consultations"),
+        apiRequest<InventoryLot[]>("/inventory/lots"),
+        apiRequest<{ total: number; alerts: OperationalAlert[] }>("/operations/alerts"),
+        apiRequest<CashOverview>("/cash/current"),
       ]);
 
       setSummary(dashboard);
@@ -619,10 +1050,15 @@ function App() {
       setAlerts(inventoryAlerts.alerts);
       setExpiryAlerts(inventoryAlerts.expiringAlerts);
       setExpirationThresholdDays(inventoryAlerts.expirationThresholdDays);
+      setAppointmentReminderMinutes(inventoryAlerts.appointmentReminderMinutes ?? 60);
       setAppointments(appointmentData);
-      setSales(recentSales);
       setInsights(aiInsights.insights);
       setInsightSource(aiInsights.source);
+      setPatients(patientsData);
+      setConsultations(consultationsData);
+      setInventoryLots(lotsData);
+      setOperationalAlerts(operationsData.alerts);
+      setCashOverview(cashData);
       setLastSyncAt(new Date());
     } catch (error) {
       showError(error, "No fue posible cargar la informacion principal.");
@@ -655,6 +1091,24 @@ function App() {
       setServiceQuickId(String(services[0].id));
     }
   }, [serviceQuickId, services]);
+
+  useEffect(() => {
+    if (!consultationForm.patientId && patients.length > 0) {
+      setConsultationForm((current) => ({
+        ...current,
+        patientId: String(patients[0].id),
+      }));
+    }
+  }, [consultationForm.patientId, patients]);
+
+  useEffect(() => {
+    if (!consultationForm.serviceProductId && services.length > 0) {
+      setConsultationForm((current) => ({
+        ...current,
+        serviceProductId: String(services[0].id),
+      }));
+    }
+  }, [consultationForm.serviceProductId, services]);
 
   useEffect(() => {
     if (!editProductId) {
@@ -728,58 +1182,77 @@ function App() {
   );
 
   const posProducts = useMemo(() => {
-    const query = normalizeText(posSearch);
+    const query = normalizeText(deferredPosSearch);
+    const intent = inferSmartSearchIntent(deferredPosSearch);
     return posItems
       .filter((product) => product.isActive)
-      .filter((product) => {
+      .map((product) => ({
+        product,
+        relevance: query ? scoreProductMatch(product, deferredPosSearch) : 0,
+      }))
+      .filter(({ product, relevance }) => {
         if (!query) {
           return true;
         }
-        return (
-          normalizeText(product.name).includes(query) ||
-          normalizeText(product.commercialName ?? "").includes(query) ||
-          normalizeText(product.sku).includes(query) ||
-          normalizeText(product.category ?? "").includes(query) ||
-          normalizeText(productKindLabel(product.kind)).includes(query)
-        );
+        if (intent.wantsServices) {
+          return product.kind === "MEDICAL_SERVICE";
+        }
+        if (intent.wantsRestock) {
+          return product.kind !== "MEDICAL_SERVICE" && product.stock <= product.minStock;
+        }
+        if (intent.wantsOutOfStock) {
+          return product.kind !== "MEDICAL_SERVICE" && product.stock === 0;
+        }
+        return relevance > 0;
       })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [posItems, posSearch]);
+      .sort((left, right) =>
+        right.relevance - left.relevance || left.product.name.localeCompare(right.product.name),
+      )
+      .map(({ product }) => product);
+  }, [deferredPosSearch, posItems]);
 
   const filteredInventory = useMemo(() => {
-    const query = normalizeText(inventoryFilter);
+    const query = normalizeText(deferredInventoryFilter);
+    const intent = inferSmartSearchIntent(deferredInventoryFilter);
     return products
-      .filter((product) => {
+      .map((product) => ({
+        product,
+        relevance: query ? scoreProductMatch(product, deferredInventoryFilter) : 0,
+      }))
+      .filter(({ product, relevance }) => {
         if (!query) {
           return true;
         }
-        return (
-          normalizeText(product.name).includes(query) ||
-          normalizeText(product.commercialName ?? "").includes(query) ||
-          normalizeText(product.sku).includes(query) ||
-          normalizeText(product.category ?? "").includes(query) ||
-          normalizeText(productKindLabel(product.kind)).includes(query)
-        );
+        if (intent.wantsRestock) {
+          return product.stock <= product.minStock;
+        }
+        if (intent.wantsOutOfStock) {
+          return product.stock === 0;
+        }
+        if (intent.wantsExpiring) {
+          return Boolean(product.expiresAt);
+        }
+        return relevance > 0;
       })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [inventoryFilter, products]);
+      .sort((left, right) =>
+        right.relevance - left.relevance || left.product.name.localeCompare(right.product.name),
+      )
+      .map(({ product }) => product);
+  }, [deferredInventoryFilter, products]);
 
   const filteredServices = useMemo(() => {
-    const query = normalizeText(serviceFilter);
+    const query = normalizeText(deferredServiceFilter);
     return services
-      .filter((product) => {
-        if (!query) {
-          return true;
-        }
-        return (
-          normalizeText(product.name).includes(query) ||
-          normalizeText(product.commercialName ?? "").includes(query) ||
-          normalizeText(product.sku).includes(query) ||
-          normalizeText(product.category ?? "").includes(query)
-        );
-      })
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [serviceFilter, services]);
+      .map((product) => ({
+        product,
+        relevance: query ? scoreProductMatch(product, deferredServiceFilter) : 0,
+      }))
+      .filter(({ relevance }) => !query || relevance > 0)
+      .sort((left, right) =>
+        right.relevance - left.relevance || left.product.name.localeCompare(right.product.name),
+      )
+      .map(({ product }) => product);
+  }, [deferredServiceFilter, services]);
 
   const filteredAppointments = useMemo(() => {
     return appointments
@@ -797,6 +1270,36 @@ function App() {
       })
       .sort((a, b) => a.appointmentAt.localeCompare(b.appointmentAt));
   }, [appointments, appointmentDateFilter, appointmentStatusFilter]);
+
+  const filteredPatients = useMemo(() => {
+    const query = normalizeText(patientSearch);
+    return patients
+      .map((patient) => ({
+        patient,
+        relevance: query ? scorePatientMatch(patient, patientSearch) : 0,
+      }))
+      .filter(({ relevance }) => !query || relevance > 0)
+      .sort((left, right) =>
+        right.relevance - left.relevance || left.patient.fullName.localeCompare(right.patient.fullName),
+      )
+      .map(({ patient }) => patient);
+  }, [patientSearch, patients]);
+
+  const pendingFollowUps = useMemo(
+    () =>
+      consultations
+        .filter((consultation) => consultation.followUpStatus === "PENDING" && consultation.followUpAt)
+        .sort((a, b) => (a.followUpAt ?? "").localeCompare(b.followUpAt ?? "")),
+    [consultations],
+  );
+
+  const selectedLots = useMemo(() => {
+    if (!stockProductId) {
+      return inventoryLots;
+    }
+
+    return inventoryLots.filter((lot) => lot.productId === Number(stockProductId));
+  }, [inventoryLots, stockProductId]);
 
   const selectedEditProduct = useMemo(
     () => products.find((product) => product.id === Number(editProductId)) ?? null,
@@ -836,6 +1339,29 @@ function App() {
   const backendDiscountValue = Number(
     Math.max(0, cartSubtotalRaw - cartTotal).toFixed(2),
   );
+
+  const activeInventoryCount = useMemo(
+    () => products.filter((product) => product.isActive).length,
+    [products],
+  );
+  const activeServiceCount = useMemo(
+    () => services.filter((service) => service.isActive).length,
+    [services],
+  );
+  const expiredAlertsCount = useMemo(
+    () => expiryAlerts.filter((alert) => alert.status === "EXPIRED").length,
+    [expiryAlerts],
+  );
+  const todayDate = localDateValue(new Date());
+  const todayAppointmentsCount = useMemo(
+    () =>
+      appointments.filter((appointment) => appointment.appointmentAt.slice(0, 10) === todayDate)
+        .length,
+    [appointments, todayDate],
+  );
+  const activeOperationalAlertsCount = operationalAlerts.length;
+  const currentCashBalance = cashOverview.openSession?.expectedAmount ?? 0;
+  const lastCashDifference = cashOverview.lastClosedSession?.difference ?? 0;
 
   function addProductToCart(product: Product) {
     const isService = product.kind === "MEDICAL_SERVICE";
@@ -921,6 +1447,8 @@ function App() {
           customerName: customerName.trim() || undefined,
           notes: saleNotes.trim() || undefined,
           discount: backendDiscountValue,
+          amountPaid: amountPaidValue,
+          changeGiven: changeDue,
           items: cart.map((item) => ({
             productId: item.productId,
             quantity: item.quantity,
@@ -1001,6 +1529,7 @@ function App() {
           stock,
           minStock,
           expiresAt: kind === "MEDICATION" ? newProduct.expiresAt : undefined,
+          lotCode: newProduct.lotCode.trim() || undefined,
           isActive: true,
         }),
       });
@@ -1016,6 +1545,7 @@ function App() {
         stock: "",
         minStock: "",
         expiresAt: "",
+        lotCode: "",
         description: "",
       });
       setNewProductSkuManuallyEdited(false);
@@ -1193,6 +1723,8 @@ function App() {
           body: JSON.stringify({
             change,
             reason: stockReason.trim(),
+            lotCode: stockLotCode.trim() || undefined,
+            expiresAt: stockLotExpiresAt || undefined,
           }),
         });
       }
@@ -1200,6 +1732,8 @@ function App() {
       setStockCost("");
       setStockChange("");
       setStockReason("Ajuste rapido");
+      setStockLotCode("");
+      setStockLotExpiresAt("");
       setNotice({
         kind: "success",
         message: autoPriceAligned
@@ -1382,6 +1916,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({
           patientName: appointmentForm.patientName.trim(),
+          patientPhone: appointmentForm.patientPhone.trim() || undefined,
           serviceType: appointmentForm.serviceType.trim(),
           notes: appointmentForm.notes.trim() || undefined,
           appointmentAt: appointmentDate.toISOString(),
@@ -1390,6 +1925,7 @@ function App() {
 
       setAppointmentForm({
         patientName: "",
+        patientPhone: "",
         serviceType: "Consulta General",
         appointmentAt: localDateTimeValue(new Date(Date.now() + 60 * 60 * 1000)),
         notes: "",
@@ -1416,6 +1952,184 @@ function App() {
       await refreshCoreData();
     } catch (error) {
       showError(error, "No fue posible actualizar la cita.");
+    }
+  }
+
+  async function createConsultation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!consultationForm.patientId) {
+      setNotice({ kind: "error", message: "Selecciona un paciente para registrar la consulta." });
+      return;
+    }
+    if (!consultationForm.serviceType.trim()) {
+      setNotice({ kind: "error", message: "El tipo de servicio es obligatorio." });
+      return;
+    }
+
+    setSavingConsultation(true);
+    try {
+      await apiRequest<Consultation>("/consultations", {
+        method: "POST",
+        body: JSON.stringify({
+          patientId: Number(consultationForm.patientId),
+          appointmentId: consultationForm.appointmentId
+            ? Number(consultationForm.appointmentId)
+            : undefined,
+          serviceProductId: consultationForm.serviceProductId
+            ? Number(consultationForm.serviceProductId)
+            : undefined,
+          serviceType: consultationForm.serviceType.trim(),
+          summary: consultationForm.summary.trim() || undefined,
+          diagnosis: consultationForm.diagnosis.trim() || undefined,
+          treatment: consultationForm.treatment.trim() || undefined,
+          observations: consultationForm.observations.trim() || undefined,
+          followUpAt: consultationForm.followUpAt
+            ? new Date(consultationForm.followUpAt).toISOString()
+            : undefined,
+        }),
+      });
+
+      setConsultationForm((current) => ({
+        ...current,
+        appointmentId: "",
+        summary: "",
+        diagnosis: "",
+        treatment: "",
+        observations: "",
+        followUpAt: "",
+      }));
+      setNotice({ kind: "success", message: "Consulta registrada correctamente." });
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible registrar la consulta.");
+    } finally {
+      setSavingConsultation(false);
+    }
+  }
+
+  async function updateConsultationFollowUpStatus(
+    consultationId: number,
+    status: "NONE" | "PENDING" | "COMPLETED" | "CANCELLED",
+  ) {
+    try {
+      await apiRequest<Consultation>(`/consultations/${consultationId}/follow-up`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      setNotice({ kind: "success", message: "Seguimiento actualizado." });
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible actualizar el seguimiento.");
+    }
+  }
+
+  async function runAssistant(query = assistantQuery) {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      setNotice({ kind: "error", message: "Escribe una consulta para el asistente." });
+      return;
+    }
+
+    setRunningAssistant(true);
+    try {
+      const response = await apiRequest<AssistantResponse>("/assistant/query", {
+        method: "POST",
+        body: JSON.stringify({ query: trimmedQuery }),
+      });
+      setAssistantQuery(trimmedQuery);
+      setAssistantResponse(response);
+    } catch (error) {
+      showError(error, "No fue posible consultar el asistente interno.");
+    } finally {
+      setRunningAssistant(false);
+    }
+  }
+
+  async function openCashSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const openingAmount = parseFloatSafe(cashOpeningAmount, NaN);
+    if (Number.isNaN(openingAmount) || openingAmount < 0) {
+      setNotice({ kind: "error", message: "El monto de apertura no es valido." });
+      return;
+    }
+
+    setProcessingCash(true);
+    try {
+      await apiRequest<CashSession>("/cash/open", {
+        method: "POST",
+        body: JSON.stringify({
+          openingAmount,
+          notes: cashOpeningNotes.trim() || undefined,
+        }),
+      });
+      setCashOpeningNotes("");
+      setNotice({ kind: "success", message: "Caja abierta correctamente." });
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible abrir la caja.");
+    } finally {
+      setProcessingCash(false);
+    }
+  }
+
+  async function registerCashMovement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amount = parseFloatSafe(cashMovementAmount, NaN);
+    if (Number.isNaN(amount) || amount <= 0) {
+      setNotice({ kind: "error", message: "El monto del movimiento no es valido." });
+      return;
+    }
+    if (!cashMovementReason.trim()) {
+      setNotice({ kind: "error", message: "Describe el motivo del movimiento." });
+      return;
+    }
+
+    setProcessingCash(true);
+    try {
+      await apiRequest<CashMovement>("/cash/movements", {
+        method: "POST",
+        body: JSON.stringify({
+          type: cashMovementType,
+          amount,
+          reason: cashMovementReason.trim(),
+        }),
+      });
+      setCashMovementAmount("");
+      setCashMovementReason("");
+      setNotice({ kind: "success", message: "Movimiento de caja registrado." });
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible registrar el movimiento de caja.");
+    } finally {
+      setProcessingCash(false);
+    }
+  }
+
+  async function closeCashSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const countedAmount = parseFloatSafe(cashCountedAmount, NaN);
+    if (Number.isNaN(countedAmount) || countedAmount < 0) {
+      setNotice({ kind: "error", message: "El monto contado no es valido." });
+      return;
+    }
+
+    setProcessingCash(true);
+    try {
+      await apiRequest<CashSession>("/cash/close", {
+        method: "POST",
+        body: JSON.stringify({
+          countedAmount,
+          notes: cashClosingNotes.trim() || undefined,
+        }),
+      });
+      setCashCountedAmount("");
+      setCashClosingNotes("");
+      setNotice({ kind: "success", message: "Caja cerrada correctamente." });
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible cerrar la caja.");
+    } finally {
+      setProcessingCash(false);
     }
   }
 
@@ -1486,7 +2200,7 @@ function App() {
 
     setLoadingReports(true);
     try {
-      const [salesReportData, reorderReportData, movementData, aiInsights] = await Promise.all([
+      const [salesReportData, reorderReportData, movementData, aiInsights, auditData] = await Promise.all([
         apiRequest<SalesReport>(
           `/reports/sales?from=${encodeURIComponent(fromDate.toISOString())}&to=${encodeURIComponent(toDate.toISOString())}`,
         ),
@@ -1499,15 +2213,18 @@ function App() {
         apiRequest<{ source: "aion" | "local"; insights: string[] }>(
           "/ai/business-insights",
         ),
+        apiRequest<{ count: number; logs: AuditLogEntry[] }>("/audit-log?take=140"),
       ]);
 
       setSalesReport(salesReportData);
       setReorderReport(reorderReportData);
       setInventoryMovementsReport(movementData.movements);
+      setAuditLogs(auditData.logs);
       setReportDays(String(daysValue));
       setCoverageDays(String(coverageValue));
       setInsights(aiInsights.insights);
       setInsightSource(aiInsights.source);
+      setLastReportsLoadedAt(new Date());
 
       return {
         salesReportData,
@@ -1529,7 +2246,7 @@ function App() {
         return;
       }
 
-      exportRestockReportPdf(reportsData.reorderReportData);
+      await exportRestockReportPdf(reportsData.reorderReportData);
       setNotice({
         kind: "success",
         message: "Reporte de surtido en PDF generado.",
@@ -1537,6 +2254,8 @@ function App() {
 
       const reorderSection = document.getElementById("reorder-report-section");
       reorderSection?.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (error) {
+      showError(error, "No fue posible generar el PDF de surtido.");
     } finally {
       setGeneratingRestockPdf(false);
     }
@@ -1546,12 +2265,16 @@ function App() {
     if (activeModule !== "reports") {
       return;
     }
-    if (salesReport && reorderReport) {
+    const needsInitialLoad = !salesReport || !reorderReport;
+    const needsRefreshAfterSync =
+      !!lastSyncAt && (!lastReportsLoadedAt || lastReportsLoadedAt.getTime() < lastSyncAt.getTime());
+
+    if (!needsInitialLoad && !needsRefreshAfterSync) {
       return;
     }
 
     void loadReports();
-  }, [activeModule, loadReports, salesReport, reorderReport]);
+  }, [activeModule, lastReportsLoadedAt, lastSyncAt, loadReports, reorderReport, salesReport]);
 
   function exportSalesCsv() {
     const fromDate = new Date(`${reportRange.from}T00:00:00`);
@@ -1590,26 +2313,49 @@ function App() {
     }
   }
 
-  const kpis = [
+  const runtimeLabel =
+    window.location.protocol === "file:" ? "escritorio local" : "vista web local";
+  const intelligenceLabel =
+    insightSource === "aion" || suggestionSource === "aion" ? "AION conectada" : "IA local";
+  const dashboardKpis: MetricTile[] = [
     {
       label: "Ventas hoy",
       value: moneyFormatter.format(summary?.salesToday ?? 0),
       helper: `${summary?.ticketsToday ?? 0} tickets emitidos`,
+      tone: "accent",
     },
     {
       label: "Stock critico",
       value: `${alerts.length}`,
       helper: `${totalShortage} unidades por reponer`,
+      tone: alerts.length > 0 ? "warning" : "success",
     },
     {
       label: "Citas pendientes",
       value: `${summary?.openAppointments ?? 0}`,
       helper: "consultas y chequeos programados",
+      tone: "neutral",
     },
     {
-      label: "Ventas 30 dias",
-      value: moneyFormatter.format(summary?.sales30Days ?? 0),
-      helper: `${summary?.tickets30Days ?? 0} transacciones`,
+      label: "Seguimientos",
+      value: `${summary?.pendingFollowUpsCount ?? pendingFollowUps.length}`,
+      helper: "pacientes con revision pendiente",
+      tone: (summary?.pendingFollowUpsCount ?? pendingFollowUps.length) > 0 ? "warning" : "success",
+    },
+    {
+      label: "Caja activa",
+      value: moneyFormatter.format(currentCashBalance),
+      helper: cashOverview.openSession ? "monto esperado en caja" : "sin caja abierta",
+      tone: cashOverview.openSession ? "accent" : "neutral",
+    },
+    {
+      label: "Alertas globales",
+      value: `${activeOperationalAlertsCount}`,
+      helper:
+        Math.abs(lastCashDifference) > 0
+          ? `ultimo corte con diferencia ${moneyFormatter.format(lastCashDifference)}`
+          : "sin descuadres recientes",
+      tone: activeOperationalAlertsCount > 0 ? "warning" : "success",
     },
   ];
 
@@ -1617,29 +2363,33 @@ function App() {
     <div className="app-shell">
       <header className="hero-panel">
         <div className="hero-brand">
-          <img className="brand-logo" src={brandLogo} alt="Logo de Farmacia" />
+          <img className="brand-logo" src={brandLogoUrl} alt="Logo de Farmacia" />
           <div className="hero-brand-copy">
-            <p className="hero-tag">SISTEMA PARA FARMACIA</p>
             <h1>Farmacia</h1>
             <p className="hero-copy">
-              Punto de venta, inventario, citas y reportes en un solo sistema local.
+              Sistema local para venta, inventario, citas y reportes con una interfaz mas limpia.
+            </p>
+            <p className="sync-note">
+              Ultima actualizacion: {lastSyncAt ? datetimeFormatter.format(lastSyncAt) : "sincronizando"}
             </p>
           </div>
         </div>
-        <button
-          className="refresh-button"
-          type="button"
-          onClick={() => {
-            void refreshCoreData();
-          }}
-          disabled={loadingData}
-        >
-          {loadingData ? "Sincronizando..." : "Sincronizar Datos"}
-        </button>
+        <div className="hero-actions">
+          <p className="hero-status">
+            {runtimeLabel} · {intelligenceLabel}
+          </p>
+          <button
+            className="refresh-button"
+            type="button"
+            onClick={() => {
+              void refreshCoreData();
+            }}
+            disabled={loadingData}
+          >
+            {loadingData ? "Actualizando..." : "Actualizar"}
+          </button>
+        </div>
       </header>
-      <p className="sync-note">
-        Ultima actualizacion: {lastSyncAt ? datetimeFormatter.format(lastSyncAt) : "sincronizando"}
-      </p>
 
       {notice && (
         <div className={`notice-banner ${notice.kind}`}>
@@ -1658,8 +2408,8 @@ function App() {
       <div className="workspace-layout">
         <aside className="module-sidebar">
           <div className="sidebar-header">
-            <p>Panel Operativo</p>
-            <h2>Farmacia</h2>
+            <p>Modulos</p>
+            <h2>Navegacion</h2>
           </div>
           <nav className="module-nav" aria-label="Navegacion de modulos">
             {moduleOptions.map((module) => (
@@ -1667,7 +2417,10 @@ function App() {
                 key={module.key}
                 type="button"
                 className={`module-button ${activeModule === module.key ? "active" : ""}`}
-                onClick={() => setActiveModule(module.key)}
+                title={module.description}
+                onClick={() => {
+                  startTransition(() => setActiveModule(module.key));
+                }}
               >
                 <span>{module.label}</span>
               </button>
@@ -1680,124 +2433,200 @@ function App() {
       {activeModule === "dashboard" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Centro De Control</h2>
-            <p>Resumen ejecutivo de ventas, alertas, citas e inteligencia operativa.</p>
+            <h2>Centro de control</h2>
+            <p>Lo esencial del dia en una sola vista.</p>
           </div>
 
-          <div className="kpi-grid">
-            {kpis.map((item) => (
-              <article key={item.label} className="kpi-card">
-                <p className="kpi-label">{item.label}</p>
-                <p className="kpi-value">{item.value}</p>
-                <p className="kpi-helper">{item.helper}</p>
-              </article>
-            ))}
-          </div>
+          <MetricTiles items={dashboardKpis} className="module-kpi-grid dashboard-kpi-grid" />
 
-          <div className="dashboard-grid">
-            <article className="surface">
-              <h3>Stock Critico</h3>
-              <p className="muted-line">
-                Alertas activas: <strong>{alerts.length}</strong>
-              </p>
-              <ul className="appointment-list">
-                {alerts.slice(0, 6).map((alert) => (
-                  <li key={alert.id}>
-                    <div>
-                      <strong>{formatProductLabel(alert.name, alert.commercialName)}</strong>
-                      <small>{alert.sku}</small>
-                    </div>
-                    <span>
-                      {alert.stock}/{alert.minStock}
-                    </span>
-                  </li>
+          <div className="dashboard-grid dashboard-primary-grid">
+            <article className="surface surface-spotlight">
+              <div className="surface-head">
+                <div>
+                  <h3>Lectura del negocio</h3>
+                </div>
+                <span className={`status-pill ${insightSource === "aion" ? "accent" : "success"}`}>
+                  {insightSource === "aion" ? "AION" : "LOCAL"}
+                </span>
+              </div>
+
+              <ul className="insight-list spotlight-list">
+                {insights.slice(0, 4).map((insight) => (
+                  <li key={insight}>{insight}</li>
                 ))}
-                {alerts.length === 0 && <li>Sin alertas por ahora.</li>}
+                {insights.length === 0 && <li>Sin analisis disponible.</li>}
               </ul>
 
-              <details className="compact-details">
-                <summary>Ver analisis IA</summary>
-                <p className="muted-line">Fuente: {insightSource.toUpperCase()}</p>
-                <ul className="insight-list">
-                  {insights.map((insight) => (
-                    <li key={insight}>{insight}</li>
-                  ))}
-                  {insights.length === 0 && <li>Sin analisis disponible.</li>}
-                </ul>
-                <p className="muted-line">
-                  Ajuste de mercado: <strong>{Math.round(marketShift * 100)}%</strong>
-                </p>
-                <div className="range-box">
-                  <label htmlFor="market-shift">Variacion esperada del mercado</label>
+              <div className="assistant-panel">
+                <div className="surface-head compact">
+                  <div>
+                    <h3>Asistente interno</h3>
+                  </div>
+                  <span className="status-pill neutral">LOCAL</span>
+                </div>
+                <div className="assistant-input-row">
                   <input
-                    id="market-shift"
-                    type="range"
-                    min={-0.15}
-                    max={0.2}
-                    step={0.01}
-                    value={marketShift}
-                    onChange={(event) => setMarketShift(Number(event.target.value))}
+                    value={assistantQuery}
+                    onChange={(event) => setAssistantQuery(event.target.value)}
+                    placeholder="Pregunta algo como: que debo surtir hoy"
                   />
-                  <button type="button" onClick={() => void calculatePriceSuggestions()}>
-                    {loadingSuggestions ? "Calculando..." : "Calcular"}
+                  <button
+                    type="button"
+                    className="primary-btn"
+                    onClick={() => {
+                      void runAssistant();
+                    }}
+                    disabled={runningAssistant}
+                  >
+                    {runningAssistant ? "Consultando..." : "Consultar"}
                   </button>
                 </div>
-                <p className="muted-line">
-                  Fuente sugerencias: {suggestionSource.toUpperCase()}
-                </p>
-                <ul className="suggestion-list">
-                  {suggestions.slice(0, 5).map((item) => (
-                    <li key={`${item.productId}-${item.suggestedPrice}`}>
-                      <div>
-                        <strong>{item.productName ?? `Producto #${item.productId}`}</strong>
-                        <small>
-                          {item.reason}
-                          {typeof item.currentCost === "number" &&
-                            typeof item.currentPrice === "number" && (
-                              <>
-                                {` | Costo: ${moneyFormatter.format(item.currentCost)} | `}
-                                {`Publico actual: ${moneyFormatter.format(item.currentPrice)}`}
-                              </>
-                            )}
-                        </small>
-                      </div>
-                      <span>{moneyFormatter.format(item.suggestedPrice)}</span>
-                    </li>
+                <div className="quick-chip-row">
+                  {[
+                    "¿Qué productos debo surtir hoy?",
+                    "¿Cuáles fueron los más vendidos de la semana?",
+                    "Muéstrame pacientes con seguimiento pendiente.",
+                    "Resume las ventas del día.",
+                  ].map((query) => (
+                    <button
+                      key={query}
+                      type="button"
+                      className="ghost-chip"
+                      onClick={() => {
+                        void runAssistant(query);
+                      }}
+                    >
+                      {query}
+                    </button>
                   ))}
-                  {suggestions.length === 0 && <li>Sin sugerencias aun.</li>}
-                </ul>
+                </div>
+                {assistantResponse && (
+                  <div className="assistant-response">
+                    <strong>{assistantResponse.title}</strong>
+                    <p>{assistantResponse.summary}</p>
+                    <ul className="compact-bullet-list">
+                      {assistantResponse.bullets.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+
+              <details className="compact-details">
+                <summary>Sugerencias de precio</summary>
+                <div className="details-content">
+                  <div className="control-panel">
+                    <p className="muted-line">
+                      Ajuste de mercado actual: <strong>{Math.round(marketShift * 100)}%</strong>
+                    </p>
+                    <div className="range-box">
+                      <label htmlFor="market-shift">Variacion esperada del mercado</label>
+                      <input
+                        id="market-shift"
+                        type="range"
+                        min={-0.15}
+                        max={0.2}
+                        step={0.01}
+                        value={marketShift}
+                        onChange={(event) => setMarketShift(Number(event.target.value))}
+                      />
+                      <button type="button" onClick={() => void calculatePriceSuggestions()}>
+                        {loadingSuggestions ? "Calculando..." : "Calcular"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="suggestion-panel">
+                    <div className="surface-head compact">
+                      <div>
+                        <h3>Sugerencias de margen</h3>
+                      </div>
+                      <span
+                        className={`status-pill ${
+                          suggestionSource === "aion" ? "accent" : "success"
+                        }`}
+                      >
+                        {suggestionSource === "aion" ? "AION" : "LOCAL"}
+                      </span>
+                    </div>
+                    <ul className="suggestion-list compact-list">
+                      {suggestions.slice(0, 4).map((item) => (
+                        <li key={`${item.productId}-${item.suggestedPrice}`}>
+                          <div>
+                            <strong>{item.productName ?? `Producto #${item.productId}`}</strong>
+                            <small>{item.reason}</small>
+                          </div>
+                          <span>{moneyFormatter.format(item.suggestedPrice)}</span>
+                        </li>
+                      ))}
+                      {suggestions.length === 0 && <li>Sin sugerencias aun.</li>}
+                    </ul>
+                  </div>
+                </div>
               </details>
             </article>
 
             <article className="surface">
-              <h3>Ventas Recientes</h3>
-              <div className="data-table-wrap">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Ticket</th>
-                      <th>Cliente</th>
-                      <th>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sales.slice(0, 6).map((sale) => (
-                      <tr key={sale.id}>
-                        <td>#{sale.id}</td>
-                        <td>{sale.customerName ?? "Mostrador"}</td>
-                        <td>{moneyFormatter.format(sale.total)}</td>
-                      </tr>
-                    ))}
-                    {sales.length === 0 && (
-                      <tr>
-                        <td colSpan={3} className="empty-cell">
-                          Sin ventas registradas.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Alertas operativas</h3>
+                </div>
               </div>
+              <ul className="appointment-list compact-list">
+                {operationalAlerts.slice(0, 5).map((alert) => (
+                  <li key={alert.id}>
+                    <div>
+                      <strong>{alert.title}</strong>
+                      <small>{alert.message}</small>
+                    </div>
+                    <span>{alert.level}</span>
+                  </li>
+                ))}
+                {operationalAlerts.length === 0 && <li>Sin alertas por ahora.</li>}
+              </ul>
+            </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Proximas citas</h3>
+                </div>
+              </div>
+              <ul className="appointment-list compact-list">
+                {(summary?.nextAppointments ?? []).map((appointment) => (
+                  <li key={appointment.id}>
+                    <div>
+                      <strong>{appointment.patientName}</strong>
+                      <small>{appointment.serviceType}</small>
+                    </div>
+                    <span>{datetimeFormatter.format(new Date(appointment.appointmentAt))}</span>
+                  </li>
+                ))}
+                {(summary?.nextAppointments ?? []).length === 0 && (
+                  <li>Sin citas programadas proximamente.</li>
+                )}
+              </ul>
+            </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Seguimientos pendientes</h3>
+                </div>
+              </div>
+              <ul className="appointment-list compact-list">
+                {pendingFollowUps.slice(0, 5).map((followUp) => (
+                  <li key={followUp.id}>
+                    <div>
+                      <strong>{followUp.patient.fullName}</strong>
+                      <small>{followUp.serviceType}</small>
+                    </div>
+                    <span>{followUp.followUpAt ? followUp.followUpAt.slice(0, 10) : "Pendiente"}</span>
+                  </li>
+                ))}
+                {pendingFollowUps.length === 0 && <li>Sin seguimientos pendientes.</li>}
+              </ul>
             </article>
           </div>
         </section>
@@ -1806,14 +2635,171 @@ function App() {
       {activeModule === "pos" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Punto De Venta</h2>
-            <p>Cobro rapido con busqueda de productos y servicios medicos.</p>
+            <h2>Punto de venta</h2>
+            <p>Cobro rapido con catalogo y ticket en la misma vista.</p>
+          </div>
+
+          <div className="reports-mini-grid pos-cash-grid">
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Caja y corte</h3>
+                </div>
+                <span className={`status-pill ${cashOverview.openSession ? "accent" : "neutral"}`}>
+                  {cashOverview.openSession ? "ABIERTA" : "CERRADA"}
+                </span>
+              </div>
+              {cashOverview.openSession ? (
+                <>
+                  <div className="kpi-grid compact-kpi">
+                    <article className="kpi-card">
+                      <p className="kpi-label">Apertura</p>
+                      <p className="kpi-value">
+                        {moneyFormatter.format(cashOverview.openSession.openingAmount)}
+                      </p>
+                      <p className="kpi-helper">inicio de turno</p>
+                    </article>
+                    <article className="kpi-card">
+                      <p className="kpi-label">Esperado</p>
+                      <p className="kpi-value">
+                        {moneyFormatter.format(cashOverview.openSession.expectedAmount)}
+                      </p>
+                      <p className="kpi-helper">monto actual en caja</p>
+                    </article>
+                  </div>
+
+                  <div className="two-panel-inline">
+                    <form className="field-grid" onSubmit={registerCashMovement}>
+                      <div className="field-grid two-col">
+                        <div className="field-group compact">
+                          <label htmlFor="cash-movement-type">Movimiento</label>
+                          <select
+                            id="cash-movement-type"
+                            value={cashMovementType}
+                            onChange={(event) =>
+                              setCashMovementType(
+                                event.target.value as "INCOME" | "EXPENSE" | "ADJUSTMENT",
+                              )
+                            }
+                          >
+                            <option value="INCOME">Ingreso</option>
+                            <option value="EXPENSE">Egreso</option>
+                            <option value="ADJUSTMENT">Ajuste</option>
+                          </select>
+                        </div>
+                        <div className="field-group compact">
+                          <label htmlFor="cash-movement-amount">Monto</label>
+                          <input
+                            id="cash-movement-amount"
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            value={cashMovementAmount}
+                            onChange={(event) => setCashMovementAmount(event.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div className="field-group compact">
+                        <label htmlFor="cash-movement-reason">Motivo</label>
+                        <input
+                          id="cash-movement-reason"
+                          value={cashMovementReason}
+                          onChange={(event) => setCashMovementReason(event.target.value)}
+                          placeholder="Caja chica, retiro, ajuste..."
+                        />
+                      </div>
+                      <button className="secondary-btn" type="submit" disabled={processingCash}>
+                        {processingCash ? "Guardando..." : "Registrar Movimiento"}
+                      </button>
+                    </form>
+
+                    <form className="field-grid" onSubmit={closeCashSession}>
+                      <div className="field-group compact">
+                        <label htmlFor="cash-counted">Monto contado</label>
+                        <input
+                          id="cash-counted"
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={cashCountedAmount}
+                          onChange={(event) => setCashCountedAmount(event.target.value)}
+                        />
+                      </div>
+                      <div className="field-group compact">
+                        <label htmlFor="cash-closing-notes">Notas de cierre</label>
+                        <input
+                          id="cash-closing-notes"
+                          value={cashClosingNotes}
+                          onChange={(event) => setCashClosingNotes(event.target.value)}
+                          placeholder="Observaciones del corte"
+                        />
+                      </div>
+                      <p className="muted-line">
+                        Ultimos movimientos: {cashOverview.openSession.movements.length}
+                      </p>
+                      <button className="primary-btn" type="submit" disabled={processingCash}>
+                        {processingCash ? "Cerrando..." : "Cerrar Caja"}
+                      </button>
+                    </form>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="muted-line">
+                    Abre una caja para llevar corte, detectar descuadres y registrar ingresos o egresos.
+                  </p>
+                  <form className="field-grid" onSubmit={openCashSession}>
+                    <div className="field-grid two-col">
+                      <div className="field-group compact">
+                        <label htmlFor="cash-opening-amount">Monto inicial</label>
+                        <input
+                          id="cash-opening-amount"
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={cashOpeningAmount}
+                          onChange={(event) => setCashOpeningAmount(event.target.value)}
+                        />
+                      </div>
+                      <div className="field-group compact">
+                        <label htmlFor="cash-opening-notes">Notas</label>
+                        <input
+                          id="cash-opening-notes"
+                          value={cashOpeningNotes}
+                          onChange={(event) => setCashOpeningNotes(event.target.value)}
+                          placeholder="Turno matutino, fondo inicial..."
+                        />
+                      </div>
+                    </div>
+                    <button className="primary-btn" type="submit" disabled={processingCash}>
+                      {processingCash ? "Abriendo..." : "Abrir Caja"}
+                    </button>
+                  </form>
+                  {cashOverview.lastClosedSession && (
+                    <p className="muted-line">
+                      Ultimo corte:
+                      {" "}
+                      {cashOverview.lastClosedSession.closedAt
+                        ? datetimeFormatter.format(new Date(cashOverview.lastClosedSession.closedAt))
+                        : "sin fecha"}
+                      {" · diferencia "}
+                      {moneyFormatter.format(cashOverview.lastClosedSession.difference ?? 0)}
+                    </p>
+                  )}
+                </>
+              )}
+            </article>
           </div>
 
           <div className="pos-grid">
             <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Catalogo</h3>
+                </div>
+              </div>
               <div className="inline-toolbar">
-                <label htmlFor="pos-search">Buscar producto o servicio</label>
+                <label htmlFor="pos-search">Buscar</label>
                 <input
                   id="pos-search"
                   value={posSearch}
@@ -1835,8 +2821,12 @@ function App() {
                     </div>
                     <div className="catalog-meta">
                       <span>{posMoneyFormatter.format(roundToPosAmount(product.price))}</span>
-                      <button type="button" onClick={() => addProductToCart(product)}>
-                        Agregar
+                      <button
+                        type="button"
+                        onClick={() => addProductToCart(product)}
+                        disabled={product.kind !== "MEDICAL_SERVICE" && product.stock <= 0}
+                      >
+                        {product.kind !== "MEDICAL_SERVICE" && product.stock <= 0 ? "Sin stock" : "Agregar"}
                       </button>
                     </div>
                   </div>
@@ -1848,7 +2838,11 @@ function App() {
             </article>
 
             <article className="surface ticket-panel">
-              <h3>Ticket Actual</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Ticket actual</h3>
+                </div>
+              </div>
               <form className="ticket-form" onSubmit={submitSale}>
                 <div className="field-grid two-col">
                   <div className="field-group">
@@ -1956,6 +2950,7 @@ function App() {
                     className="ghost-btn"
                     type="button"
                     onClick={() => setAmountPaid(String(cartTotal))}
+                    disabled={cart.length === 0}
                   >
                     Pago Exacto
                   </button>
@@ -1983,10 +2978,15 @@ function App() {
                 <button
                   className="primary-btn"
                   type="submit"
-                  disabled={submittingSale || pendingAmount > 0}
+                  disabled={submittingSale || pendingAmount > 0 || cart.length === 0}
                 >
                   {submittingSale ? "Procesando venta..." : "Cobrar Y Registrar"}
                 </button>
+                {!cashOverview.openSession && (
+                  <p className="muted-line compact-note">
+                    Puedes vender sin caja abierta, pero no se integrara al corte hasta abrir caja.
+                  </p>
+                )}
               </form>
             </article>
           </div>
@@ -1997,15 +2997,12 @@ function App() {
         <section className="workspace">
           <div className="module-header">
             <h2>Inventario</h2>
-            <p>
-              Registro exclusivo para medicamento y material quirurgico para surtir, con control de
-              caducidad (servicios en modulo Servicios/Citas).
-            </p>
+            <p>{activeInventoryCount} productos activos para surtido y control.</p>
           </div>
 
           <div className="inventory-grid">
             <article className="surface">
-              <h3>Registro Para Surtir (Medicamento y Material Quirurgico)</h3>
+              <h3>Nuevo producto</h3>
               <form className="field-grid" onSubmit={submitNewProduct}>
                 <div className="field-grid two-col">
                   <div className="field-group">
@@ -2165,6 +3162,21 @@ function App() {
                   </div>
                 </div>
 
+                <div className="field-group">
+                  <label htmlFor="new-lot-code">Lote inicial (opcional)</label>
+                  <input
+                    id="new-lot-code"
+                    value={newProduct.lotCode}
+                    onChange={(event) =>
+                      setNewProduct((current) => ({
+                        ...current,
+                        lotCode: event.target.value,
+                      }))
+                    }
+                    placeholder="LOTE-2026-01"
+                  />
+                </div>
+
                 {newProduct.kind === "MEDICATION" && (
                   <div className="field-group">
                     <label htmlFor="new-expires-at">Caducidad</label>
@@ -2202,66 +3214,92 @@ function App() {
                 </button>
               </form>
 
-              <h3>Ajuste Rapido De Costo y Cantidad</h3>
-              <form className="field-grid" onSubmit={submitStockAdjustment}>
-                <div className="field-group">
-                  <label htmlFor="stock-product">Producto</label>
-                  <select
-                    id="stock-product"
-                    value={stockProductId}
-                    onChange={(event) => setStockProductId(event.target.value)}
-                  >
-                    {products.map((product) => (
-                      <option key={product.id} value={product.id}>
-                        {formatProductLabel(product.name, product.commercialName)} ({product.sku})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field-grid two-col">
+              <details className="compact-details">
+                <summary>Ajustar stock o costo</summary>
+                <form className="field-grid details-content" onSubmit={submitStockAdjustment}>
                   <div className="field-group">
-                    <label htmlFor="stock-cost">Nuevo Costo (opcional)</label>
-                    <input
-                      id="stock-cost"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={stockCost}
-                      onChange={(event) => setStockCost(event.target.value)}
-                    />
+                    <label htmlFor="stock-product">Producto</label>
+                    <select
+                      id="stock-product"
+                      value={stockProductId}
+                      onChange={(event) => setStockProductId(event.target.value)}
+                    >
+                      {products.map((product) => (
+                        <option key={product.id} value={product.id}>
+                          {formatProductLabel(product.name, product.commercialName)} ({product.sku})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field-grid two-col">
+                    <div className="field-group">
+                      <label htmlFor="stock-cost">Nuevo Costo (opcional)</label>
+                      <input
+                        id="stock-cost"
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={stockCost}
+                        onChange={(event) => setStockCost(event.target.value)}
+                      />
+                    </div>
+                    <div className="field-group">
+                      <label htmlFor="stock-change">Cambio Cantidad (+/- opcional)</label>
+                      <input
+                        id="stock-change"
+                        type="number"
+                        step={1}
+                        value={stockChange}
+                        onChange={(event) => setStockChange(event.target.value)}
+                      />
+                    </div>
                   </div>
                   <div className="field-group">
-                    <label htmlFor="stock-change">Cambio Cantidad (+/- opcional)</label>
+                    <label htmlFor="stock-reason">Motivo (si cambias cantidad)</label>
                     <input
-                      id="stock-change"
-                      type="number"
-                      step={1}
-                      value={stockChange}
-                      onChange={(event) => setStockChange(event.target.value)}
+                      id="stock-reason"
+                      value={stockReason}
+                      onChange={(event) => setStockReason(event.target.value)}
                     />
                   </div>
-                </div>
-                <div className="field-group">
-                  <label htmlFor="stock-reason">Motivo (si cambias cantidad)</label>
-                  <input
-                    id="stock-reason"
-                    value={stockReason}
-                    onChange={(event) => setStockReason(event.target.value)}
-                  />
-                </div>
-                <p className="muted-line compact-note">
-                  Si el costo supera el precio publico, el sistema alinea el precio automaticamente.
-                </p>
-                <button className="secondary-btn" type="submit" disabled={adjustingStock}>
-                  {adjustingStock ? "Aplicando..." : "Aplicar Ajuste Rapido"}
-                </button>
-              </form>
+                  <div className="field-grid two-col">
+                    <div className="field-group">
+                      <label htmlFor="stock-lot-code">Lote (opcional)</label>
+                      <input
+                        id="stock-lot-code"
+                        value={stockLotCode}
+                        onChange={(event) => setStockLotCode(event.target.value)}
+                        placeholder="LOTE-2026-01"
+                      />
+                    </div>
+                    <div className="field-group">
+                      <label htmlFor="stock-lot-expiry">Caducidad del lote</label>
+                      <input
+                        id="stock-lot-expiry"
+                        type="date"
+                        value={stockLotExpiresAt}
+                        onChange={(event) => setStockLotExpiresAt(event.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <p className="muted-line compact-note">
+                    Si el costo supera el precio publico, el sistema alinea el precio automaticamente.
+                  </p>
+                  <button className="secondary-btn" type="submit" disabled={adjustingStock}>
+                    {adjustingStock ? "Aplicando..." : "Aplicar Ajuste"}
+                  </button>
+                </form>
+              </details>
             </article>
 
             <article className="surface">
-              <h3>Catalogo De Inventario</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Inventario</h3>
+                </div>
+              </div>
               <div className="inline-toolbar">
-                <label htmlFor="inventory-filter">Filtrar</label>
+                <label htmlFor="inventory-filter">Buscar</label>
                 <input
                   id="inventory-filter"
                   value={inventoryFilter}
@@ -2413,6 +3451,46 @@ function App() {
                   </button>
                 </form>
               </details>
+
+              <details className="compact-details">
+                <summary>Lotes y caducidades</summary>
+                <div className="details-content">
+                  <p className="muted-line">
+                    Lotes visibles para el producto seleccionado: <strong>{selectedLots.length}</strong>
+                  </p>
+                  <div className="data-table-wrap medium">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Lote</th>
+                          <th>Producto</th>
+                          <th>Cantidad</th>
+                          <th>Caducidad</th>
+                          <th>Costo</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {selectedLots.map((lot) => (
+                          <tr key={lot.id}>
+                            <td>{lot.lotCode}</td>
+                            <td>{formatProductLabel(lot.product.name, lot.product.commercialName)}</td>
+                            <td>{lot.quantity}</td>
+                            <td>{lot.expiresAt ? lot.expiresAt.slice(0, 10) : "--"}</td>
+                            <td>{moneyFormatter.format(lot.cost)}</td>
+                          </tr>
+                        ))}
+                        {selectedLots.length === 0 && (
+                          <tr>
+                            <td colSpan={5} className="empty-cell">
+                              No hay lotes registrados para este producto.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </details>
             </article>
           </div>
         </section>
@@ -2421,11 +3499,8 @@ function App() {
       {activeModule === "services" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Servicios Medicos</h2>
-            <p>
-              Alta y configuracion de servicios para mostrarlos en Punto de Venta y
-              utilizarlos en Citas.
-            </p>
+            <h2>Servicios medicos</h2>
+            <p>{activeServiceCount} servicios activos para POS y agenda.</p>
           </div>
 
           <div className="inventory-grid">
@@ -2536,61 +3611,63 @@ function App() {
                 </button>
               </form>
 
-              <h3>Ajuste Rapido De Servicio (Costo y Precio)</h3>
-              <form className="field-grid" onSubmit={submitQuickServiceUpdate}>
-                <div className="field-group">
-                  <label htmlFor="quick-service">Servicio</label>
-                  <select
-                    id="quick-service"
-                    value={serviceQuickId}
-                    onChange={(event) => setServiceQuickId(event.target.value)}
-                  >
-                    {services.map((service) => (
-                      <option key={service.id} value={service.id}>
-                        {service.name} ({service.sku})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="field-grid two-col">
+              <details className="compact-details">
+                <summary>Ajustar costo o precio</summary>
+                <form className="field-grid details-content" onSubmit={submitQuickServiceUpdate}>
                   <div className="field-group">
-                    <label htmlFor="quick-service-cost">Costo</label>
-                    <input
-                      id="quick-service-cost"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={serviceQuickCost}
-                      onChange={(event) => setServiceQuickCost(event.target.value)}
-                    />
+                    <label htmlFor="quick-service">Servicio</label>
+                    <select
+                      id="quick-service"
+                      value={serviceQuickId}
+                      onChange={(event) => setServiceQuickId(event.target.value)}
+                    >
+                      {services.map((service) => (
+                        <option key={service.id} value={service.id}>
+                          {service.name} ({service.sku})
+                        </option>
+                      ))}
+                    </select>
                   </div>
-                  <div className="field-group">
-                    <label htmlFor="quick-service-price">Precio Al Publico</label>
-                    <input
-                      id="quick-service-price"
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={serviceQuickPrice}
-                      onChange={(event) => setServiceQuickPrice(event.target.value)}
-                    />
+
+                  <div className="field-grid two-col">
+                    <div className="field-group">
+                      <label htmlFor="quick-service-cost">Costo</label>
+                      <input
+                        id="quick-service-cost"
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={serviceQuickCost}
+                        onChange={(event) => setServiceQuickCost(event.target.value)}
+                      />
+                    </div>
+                    <div className="field-group">
+                      <label htmlFor="quick-service-price">Precio Al Publico</label>
+                      <input
+                        id="quick-service-price"
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={serviceQuickPrice}
+                        onChange={(event) => setServiceQuickPrice(event.target.value)}
+                      />
+                    </div>
                   </div>
-                </div>
 
-                {selectedQuickService && (
-                  <p className="muted-line compact-note">
-                    Servicio seleccionado: <strong>{selectedQuickService.name}</strong>
-                  </p>
-                )}
+                  {selectedQuickService && (
+                    <p className="muted-line compact-note">
+                      Servicio seleccionado: <strong>{selectedQuickService.name}</strong>
+                    </p>
+                  )}
 
-                <button className="secondary-btn" type="submit" disabled={updatingServiceQuick}>
-                  {updatingServiceQuick ? "Aplicando..." : "Aplicar Ajuste Rapido"}
-                </button>
-              </form>
+                  <button className="secondary-btn" type="submit" disabled={updatingServiceQuick}>
+                    {updatingServiceQuick ? "Aplicando..." : "Aplicar Ajuste"}
+                  </button>
+                </form>
+              </details>
 
               <details className="compact-details">
-                <summary>Editar servicio existente</summary>
+                <summary>Editar servicio</summary>
                 <form className="field-grid details-content" onSubmit={submitServiceUpdate}>
                   <div className="field-group">
                     <label htmlFor="edit-service">Servicio</label>
@@ -2670,9 +3747,13 @@ function App() {
             </article>
 
             <article className="surface">
-              <h3>Catalogo De Servicios</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Servicios</h3>
+                </div>
+              </div>
               <div className="inline-toolbar">
-                <label htmlFor="service-filter">Filtrar</label>
+                <label htmlFor="service-filter">Buscar</label>
                 <input
                   id="service-filter"
                   value={serviceFilter}
@@ -2722,139 +3803,213 @@ function App() {
       {activeModule === "alerts" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Alertas De Stock</h2>
+            <h2>Alertas</h2>
             <p>
-              Cada alerta se calcula por producto cuando el stock actual es menor o
-              igual al stock minimo configurado en Inventario, y tambien por
-              medicamentos proximos a caducar.
+              {alerts.length} alertas activas, {expiredAlertsCount} vencidos y vigilancia de
+              caducidad con {expirationThresholdDays} dias de anticipacion; citas con aviso
+              {` ${appointmentReminderMinutes} min antes.`}
             </p>
           </div>
 
-          <article className="surface">
-            <p className="muted-line">
-              Alertas activas: <strong>{alerts.length}</strong> | Faltantes totales:
-              <strong> {totalShortage}</strong> unidades.
-            </p>
-
-            <div className="data-table-wrap tall">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Producto</th>
-                    <th>SKU</th>
-                    <th>Stock Actual</th>
-                    <th>Stock Minimo</th>
-                    <th>Faltante</th>
-                    <th>Accion</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {alerts.map((alert) => (
-                    <tr key={alert.id}>
-                      <td>{formatProductLabel(alert.name, alert.commercialName)}</td>
-                      <td>{alert.sku}</td>
-                      <td>{alert.stock}</td>
-                      <td>{alert.minStock}</td>
-                      <td>{Math.max(0, alert.shortage)}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="ghost-btn"
-                          onClick={() => {
-                            setActiveModule("inventory");
-                            setStockProductId(String(alert.id));
-                            setStockChange(String(Math.max(1, alert.shortage)));
-                            setStockReason("Reposicion por alerta");
-                          }}
-                        >
-                          Reponer
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {alerts.length === 0 && (
+          <div className="reports-mini-grid alerts-grid">
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Motor de alertas</h3>
+                </div>
+              </div>
+              <p className="muted-line">
+                Alertas unificadas: <strong>{operationalAlerts.length}</strong>
+              </p>
+              <div className="data-table-wrap tall">
+                <table className="data-table">
+                  <thead>
                     <tr>
-                      <td colSpan={6} className="empty-cell">
-                        Sin alertas de inventario por ahora.
-                      </td>
+                      <th>Tipo</th>
+                      <th>Severidad</th>
+                      <th>Detalle</th>
+                      <th>Modulo</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {operationalAlerts.map((alert) => (
+                      <tr key={alert.id}>
+                        <td>{alert.title}</td>
+                        <td>
+                          <span className={`status-chip ${alert.level === "critical" ? "cancelled" : alert.level === "warning" ? "high" : "scheduled"}`}>
+                            {alert.level}
+                          </span>
+                        </td>
+                        <td>{alert.message}</td>
+                        <td>{alert.module}</td>
+                      </tr>
+                    ))}
+                    {operationalAlerts.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="empty-cell">
+                          Sin alertas operativas activas.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </article>
 
-            <h3>Proximos A Caducar ({expirationThresholdDays} dias)</h3>
-            <p className="muted-line">
-              Medicamentos con vencimiento cercano o vencidos: <strong>{expiryAlerts.length}</strong>
-            </p>
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Stock critico</h3>
+                </div>
+              </div>
+              <p className="muted-line">
+                Faltantes totales: <strong>{totalShortage}</strong> unidades.
+              </p>
 
-            <div className="data-table-wrap tall">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Medicamento</th>
-                    <th>SKU</th>
-                    <th>Caduca</th>
-                    <th>Dias</th>
-                    <th>Estado</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {expiryAlerts.map((alert) => (
-                    <tr key={alert.id}>
-                      <td>{formatProductLabel(alert.name, alert.commercialName)}</td>
-                      <td>{alert.sku}</td>
-                      <td>{alert.expiresAt.slice(0, 10)}</td>
-                      <td>{alert.daysToExpire}</td>
-                      <td>
-                        <span
-                          className={`status-chip ${
-                            alert.status === "EXPIRED" ? "cancelled" : "high"
-                          }`}
-                        >
-                          {alert.status === "EXPIRED" ? "Vencido" : "Proximo"}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {expiryAlerts.length === 0 && (
+              <div className="data-table-wrap tall">
+                <table className="data-table">
+                  <thead>
                     <tr>
-                      <td colSpan={5} className="empty-cell">
-                        Sin medicamentos proximos a caducar.
-                      </td>
+                      <th>Producto</th>
+                      <th>SKU</th>
+                      <th>Stock Actual</th>
+                      <th>Stock Minimo</th>
+                      <th>Faltante</th>
+                      <th>Accion</th>
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </article>
+                  </thead>
+                  <tbody>
+                    {alerts.map((alert) => (
+                      <tr key={alert.id}>
+                        <td>{formatProductLabel(alert.name, alert.commercialName)}</td>
+                        <td>{alert.sku}</td>
+                        <td>{alert.stock}</td>
+                        <td>{alert.minStock}</td>
+                        <td>{Math.max(0, alert.shortage)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="ghost-btn"
+                            onClick={() => {
+                              startTransition(() => setActiveModule("inventory"));
+                              setStockProductId(String(alert.id));
+                              setStockChange(String(Math.max(1, alert.shortage)));
+                              setStockReason("Reposicion por alerta");
+                            }}
+                          >
+                            Reponer
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {alerts.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="empty-cell">
+                          Sin alertas de inventario por ahora.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Proximos a caducar</h3>
+                </div>
+              </div>
+              <p className="muted-line">
+                Medicamentos con vencimiento cercano o vencidos: <strong>{expiryAlerts.length}</strong>
+              </p>
+
+              <div className="data-table-wrap tall">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Medicamento</th>
+                      <th>SKU</th>
+                      <th>Lote</th>
+                      <th>Caduca</th>
+                      <th>Dias</th>
+                      <th>Estado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {expiryAlerts.map((alert) => (
+                      <tr key={alert.id}>
+                        <td>{formatProductLabel(alert.name, alert.commercialName)}</td>
+                        <td>{alert.sku}</td>
+                        <td>{alert.lotCode ?? "--"}</td>
+                        <td>{alert.expiresAt.slice(0, 10)}</td>
+                        <td>{alert.daysToExpire}</td>
+                        <td>
+                          <span
+                            className={`status-chip ${
+                              alert.status === "EXPIRED" ? "cancelled" : "high"
+                            }`}
+                          >
+                            {alert.status === "EXPIRED" ? "Vencido" : "Proximo"}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {expiryAlerts.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="empty-cell">
+                          Sin medicamentos proximos a caducar.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </article>
+          </div>
         </section>
       )}
 
       {activeModule === "appointments" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Gestion De Citas Y Horarios</h2>
-            <p>Agenda de consultas y chequeos con control de estado por paciente.</p>
+            <h2>Citas</h2>
+            <p>{todayAppointmentsCount} citas registradas para hoy.</p>
           </div>
 
           <div className="appointments-grid">
             <article className="surface">
               <h3>Nueva Cita</h3>
               <form className="field-grid" onSubmit={createAppointment}>
-                <div className="field-group">
-                  <label htmlFor="appointment-name">Paciente</label>
-                  <input
-                    id="appointment-name"
-                    value={appointmentForm.patientName}
-                    onChange={(event) =>
-                      setAppointmentForm((current) => ({
-                        ...current,
-                        patientName: event.target.value,
-                      }))
-                    }
-                    placeholder="Nombre completo"
-                  />
+                <div className="field-grid two-col">
+                  <div className="field-group">
+                    <label htmlFor="appointment-name">Paciente</label>
+                    <input
+                      id="appointment-name"
+                      value={appointmentForm.patientName}
+                      onChange={(event) =>
+                        setAppointmentForm((current) => ({
+                          ...current,
+                          patientName: event.target.value,
+                        }))
+                      }
+                      placeholder="Nombre completo"
+                    />
+                  </div>
+                  <div className="field-group">
+                    <label htmlFor="appointment-phone">Telefono</label>
+                    <input
+                      id="appointment-phone"
+                      value={appointmentForm.patientPhone}
+                      onChange={(event) =>
+                        setAppointmentForm((current) => ({
+                          ...current,
+                          patientPhone: event.target.value,
+                        }))
+                      }
+                      placeholder="Opcional"
+                    />
+                  </div>
                 </div>
 
                 <div className="field-group">
@@ -2916,7 +4071,11 @@ function App() {
             </article>
 
             <article className="surface">
-              <h3>Agenda Del Dia</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Agenda</h3>
+                </div>
+              </div>
               <div className="inline-toolbar stack-mobile">
                 <div className="field-group compact">
                   <label htmlFor="date-filter">Fecha</label>
@@ -2960,36 +4119,24 @@ function App() {
                     </div>
                     <div className="agenda-actions">
                       <span className={`status-chip ${appointment.status.toLowerCase()}`}>
-                        {appointment.status}
+                        {appointmentStatusLabel(appointment.status)}
                       </span>
-                      <div className="button-row">
-                        <button
-                          className="ghost-btn"
-                          type="button"
-                          onClick={() =>
-                            void updateAppointmentStatus(appointment.id, "SCHEDULED")
+                      <div className="field-group compact agenda-status-field">
+                        <label htmlFor={`appointment-status-${appointment.id}`}>Estado</label>
+                        <select
+                          id={`appointment-status-${appointment.id}`}
+                          value={appointment.status}
+                          onChange={(event) =>
+                            void updateAppointmentStatus(
+                              appointment.id,
+                              event.target.value as Appointment["status"],
+                            )
                           }
                         >
-                          Programada
-                        </button>
-                        <button
-                          className="ghost-btn"
-                          type="button"
-                          onClick={() =>
-                            void updateAppointmentStatus(appointment.id, "COMPLETED")
-                          }
-                        >
-                          Completar
-                        </button>
-                        <button
-                          className="ghost-btn"
-                          type="button"
-                          onClick={() =>
-                            void updateAppointmentStatus(appointment.id, "CANCELLED")
-                          }
-                        >
-                          Cancelar
-                        </button>
+                          <option value="SCHEDULED">Programada</option>
+                          <option value="COMPLETED">Completada</option>
+                          <option value="CANCELLED">Cancelada</option>
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -2999,6 +4146,264 @@ function App() {
                 )}
               </div>
             </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Pacientes y seguimiento</h3>
+                </div>
+              </div>
+              <div className="inline-toolbar">
+                <label htmlFor="patient-search">Buscar</label>
+                <input
+                  id="patient-search"
+                  value={patientSearch}
+                  onChange={(event) => setPatientSearch(event.target.value)}
+                  placeholder="Nombre, telefono o nota"
+                />
+              </div>
+
+              <div className="agenda-list compact-list">
+                {filteredPatients.slice(0, 6).map((patient) => (
+                  <div key={patient.id} className="agenda-item">
+                    <div>
+                      <strong>{patient.fullName}</strong>
+                      <p>{patient.phone ?? "Sin telefono"}</p>
+                      <small>
+                        Ultima visita: {patient.lastVisitAt ? patient.lastVisitAt.slice(0, 10) : "--"}
+                      </small>
+                    </div>
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={() =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          patientId: String(patient.id),
+                        }))
+                      }
+                    >
+                      Usar en consulta
+                    </button>
+                  </div>
+                ))}
+                {filteredPatients.length === 0 && (
+                  <p className="empty-cell">Sin pacientes para el filtro actual.</p>
+                )}
+              </div>
+
+              <details className="compact-details">
+                <summary>Seguimientos pendientes</summary>
+                <div className="details-content">
+                  <div className="agenda-list compact-list">
+                    {pendingFollowUps.slice(0, 8).map((consultation) => (
+                      <div key={consultation.id} className="agenda-item">
+                        <div>
+                          <strong>{consultation.patient.fullName}</strong>
+                          <p>{consultation.serviceType}</p>
+                          <small>
+                            {consultation.followUpAt
+                              ? consultation.followUpAt.slice(0, 10)
+                              : "Sin fecha"}
+                          </small>
+                        </div>
+                        <div className="agenda-actions">
+                          <span className="status-chip scheduled">
+                            {consultation.followUpStatus}
+                          </span>
+                          <button
+                            type="button"
+                            className="ghost-btn"
+                            onClick={() => {
+                              void updateConsultationFollowUpStatus(
+                                consultation.id,
+                                "COMPLETED",
+                              );
+                            }}
+                          >
+                            Marcar resuelto
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {pendingFollowUps.length === 0 && (
+                      <p className="empty-cell">Sin seguimientos pendientes.</p>
+                    )}
+                  </div>
+                </div>
+              </details>
+            </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Consulta y servicio medico</h3>
+                </div>
+              </div>
+              <form className="field-grid" onSubmit={createConsultation}>
+                <div className="field-grid two-col">
+                  <div className="field-group">
+                    <label htmlFor="consultation-patient">Paciente</label>
+                    <select
+                      id="consultation-patient"
+                      value={consultationForm.patientId}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          patientId: event.target.value,
+                        }))
+                      }
+                    >
+                      {patients.map((patient) => (
+                        <option key={patient.id} value={patient.id}>
+                          {patient.fullName}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field-group">
+                    <label htmlFor="consultation-appointment">Cita asociada</label>
+                    <select
+                      id="consultation-appointment"
+                      value={consultationForm.appointmentId}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          appointmentId: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">Sin cita asociada</option>
+                      {appointments.map((appointment) => (
+                        <option key={appointment.id} value={appointment.id}>
+                          {appointment.patientName} · {appointment.serviceType}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="field-grid two-col">
+                  <div className="field-group">
+                    <label htmlFor="consultation-service-product">Servicio catalogado</label>
+                    <select
+                      id="consultation-service-product"
+                      value={consultationForm.serviceProductId}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          serviceProductId: event.target.value,
+                          serviceType:
+                            services.find((service) => service.id === Number(event.target.value))
+                              ?.name ?? current.serviceType,
+                        }))
+                      }
+                    >
+                      {services.map((service) => (
+                        <option key={service.id} value={service.id}>
+                          {service.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field-group">
+                    <label htmlFor="consultation-service-type">Tipo de servicio</label>
+                    <input
+                      id="consultation-service-type"
+                      value={consultationForm.serviceType}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          serviceType: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="consultation-summary">Resumen ejecutivo</label>
+                  <textarea
+                    id="consultation-summary"
+                    rows={2}
+                    value={consultationForm.summary}
+                    onChange={(event) =>
+                      setConsultationForm((current) => ({
+                        ...current,
+                        summary: event.target.value,
+                      }))
+                    }
+                    placeholder="Resumen corto para el administrador"
+                  />
+                </div>
+
+                <div className="field-grid two-col">
+                  <div className="field-group">
+                    <label htmlFor="consultation-diagnosis">Diagnostico / hallazgo</label>
+                    <textarea
+                      id="consultation-diagnosis"
+                      rows={3}
+                      value={consultationForm.diagnosis}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          diagnosis: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="field-group">
+                    <label htmlFor="consultation-treatment">Tratamiento / accion</label>
+                    <textarea
+                      id="consultation-treatment"
+                      rows={3}
+                      value={consultationForm.treatment}
+                      onChange={(event) =>
+                        setConsultationForm((current) => ({
+                          ...current,
+                          treatment: event.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="consultation-observations">Observaciones</label>
+                  <textarea
+                    id="consultation-observations"
+                    rows={3}
+                    value={consultationForm.observations}
+                    onChange={(event) =>
+                      setConsultationForm((current) => ({
+                        ...current,
+                        observations: event.target.value,
+                      }))
+                    }
+                    placeholder="Notas clinicas o administrativas"
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="consultation-follow-up">Seguimiento para</label>
+                  <input
+                    id="consultation-follow-up"
+                    type="datetime-local"
+                    value={consultationForm.followUpAt}
+                    onChange={(event) =>
+                      setConsultationForm((current) => ({
+                        ...current,
+                        followUpAt: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+
+                <button className="primary-btn" type="submit" disabled={savingConsultation}>
+                  {savingConsultation ? "Guardando..." : "Registrar Consulta"}
+                </button>
+              </form>
+            </article>
           </div>
         </section>
       )}
@@ -3006,102 +4411,123 @@ function App() {
       {activeModule === "reports" && (
         <section className="workspace">
           <div className="module-header">
-            <h2>Reportes Y Analisis</h2>
-            <p>
-              Reporte de ventas por periodo, listado de medicamentos necesarios y
-              exportaciones operativas.
-            </p>
+            <h2>Reportes</h2>
+            <p>Ventas, surtido y exportaciones desde el sistema local.</p>
           </div>
 
           <article className="surface">
-            <h3>Configuracion Del Reporte</h3>
+            <div className="surface-head compact">
+              <div>
+                <h3>Configuracion</h3>
+              </div>
+            </div>
             <form
-              className="inline-toolbar stack-mobile"
+              className="report-config-form"
               onSubmit={(event) => {
                 event.preventDefault();
-                void generateRestockReport();
+                void loadReports();
               }}
             >
-              <div className="field-group compact">
-                <label htmlFor="report-from">Desde</label>
-                <input
-                  id="report-from"
-                  type="date"
-                  value={reportRange.from}
-                  onChange={(event) =>
-                    setReportRange((current) => ({
-                      ...current,
-                      from: event.target.value,
-                    }))
-                  }
-                />
+              <div className="report-filter-grid">
+                <div className="field-group compact">
+                  <label htmlFor="report-from">Desde</label>
+                  <input
+                    id="report-from"
+                    type="date"
+                    value={reportRange.from}
+                    onChange={(event) =>
+                      setReportRange((current) => ({
+                        ...current,
+                        from: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div className="field-group compact">
+                  <label htmlFor="report-to">Hasta</label>
+                  <input
+                    id="report-to"
+                    type="date"
+                    value={reportRange.to}
+                    onChange={(event) =>
+                      setReportRange((current) => ({ ...current, to: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className="field-group compact">
+                  <label htmlFor="report-days">Dias analizados</label>
+                  <input
+                    id="report-days"
+                    type="number"
+                    min={1}
+                    max={120}
+                    value={reportDays}
+                    onChange={(event) => setReportDays(event.target.value)}
+                  />
+                </div>
+                <div className="field-group compact">
+                  <label htmlFor="coverage-days">Cobertura deseada</label>
+                  <input
+                    id="coverage-days"
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={coverageDays}
+                    onChange={(event) => setCoverageDays(event.target.value)}
+                  />
+                </div>
               </div>
-              <div className="field-group compact">
-                <label htmlFor="report-to">Hasta</label>
-                <input
-                  id="report-to"
-                  type="date"
-                  value={reportRange.to}
-                  onChange={(event) =>
-                    setReportRange((current) => ({ ...current, to: event.target.value }))
-                  }
-                />
-              </div>
-              <div className="field-group compact">
-                <label htmlFor="report-days">Dias analizados</label>
-                <input
-                  id="report-days"
-                  type="number"
-                  min={1}
-                  max={120}
-                  value={reportDays}
-                  onChange={(event) => setReportDays(event.target.value)}
-                />
-              </div>
-              <div className="field-group compact">
-                <label htmlFor="coverage-days">Cobertura deseada</label>
-                <input
-                  id="coverage-days"
-                  type="number"
-                  min={1}
-                  max={60}
-                  value={coverageDays}
-                  onChange={(event) => setCoverageDays(event.target.value)}
-                />
-              </div>
-              <button
-                className="primary-btn"
-                type="submit"
-                disabled={generatingRestockPdf || loadingReports}
-              >
-                {generatingRestockPdf
-                  ? "Generando PDF..."
-                  : "Generar Reporte De Surtido PDF"}
-              </button>
-            </form>
 
-            <p className="muted-line">
-              Este boton genera y descarga el PDF de surtido para medicamento y material quirurgico.
+              <div className="report-action-stack">
+                <button
+                  className="primary-btn report-refresh-btn"
+                  type="submit"
+                  disabled={loadingReports || generatingRestockPdf}
+                >
+                  {loadingReports ? "Actualizando..." : "Actualizar reportes"}
+                </button>
+                <button
+                  className="secondary-btn report-pdf-btn"
+                  type="button"
+                  onClick={() => {
+                    void generateRestockReport();
+                  }}
+                  disabled={generatingRestockPdf || loadingReports}
+                >
+                  {generatingRestockPdf ? "Generando PDF..." : "Exportar PDF de surtido"}
+                </button>
+              </div>
+            </form>
+            <p className="muted-line report-config-note">
+              Ventas usa Desde/Hasta. El reporte de surtido y su PDF usan Dias analizados y
+              Cobertura deseada.
             </p>
 
-            <div className="reports-action-row">
-              <button
-                className="secondary-btn"
-                type="button"
-                onClick={() => void runMonthlyPriceCutoff()}
-                disabled={runningMonthlyCutoff}
-              >
-                {runningMonthlyCutoff
-                  ? "Generando Corte Mensual..."
-                  : "Corte De Caja Mensual (IA Precios)"}
-              </button>
-              <button className="secondary-btn" type="button" onClick={exportSalesCsv}>
-                Exportar Ventas CSV
-              </button>
-              <button className="secondary-btn" type="button" onClick={() => void exportDatabaseBackup()}>
-                Exportar Base De Datos
-              </button>
-            </div>
+            <details className="compact-details">
+              <summary>Acciones avanzadas</summary>
+              <div className="reports-action-row details-content">
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={() => void runMonthlyPriceCutoff()}
+                  disabled={runningMonthlyCutoff}
+                >
+                  {runningMonthlyCutoff
+                    ? "Generando corte..."
+                    : "Corte mensual de precios"}
+                </button>
+                <button className="secondary-btn" type="button" onClick={exportSalesCsv}>
+                  Exportar ventas CSV
+                </button>
+                <button
+                  className="secondary-btn"
+                  type="button"
+                  onClick={() => void exportDatabaseBackup()}
+                >
+                  Exportar base de datos
+                </button>
+              </div>
+            </details>
             {lastBackupPath && (
               <p className="muted-line">Ultimo respaldo guardado en: {lastBackupPath}</p>
             )}
@@ -3109,7 +4535,11 @@ function App() {
 
           <div className="reports-grid">
             <article className="surface">
-              <h3>Reporte De Ventas</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Reporte de ventas</h3>
+                </div>
+              </div>
               {loadingReports && <p className="muted-line">Generando reporte...</p>}
               {!loadingReports && salesReport && (
                 <>
@@ -3117,6 +4547,25 @@ function App() {
                     Este reporte desglosa cada ticket con su ID, ingresos, costos estimados,
                     descuentos aplicados y productos mas/menos vendidos.
                   </p>
+
+                  <div className="insight-inline-card">
+                    <strong>Lectura ejecutiva</strong>
+                    <ul className="compact-bullet-list">
+                      {salesReport.highlights.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+
+                  {salesReport.anomalies.length > 0 && (
+                    <div className="quick-chip-row">
+                      {salesReport.anomalies.map((anomaly) => (
+                        <span key={anomaly.message} className={`status-pill ${anomaly.severity}`}>
+                          {anomaly.type}
+                        </span>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="kpi-grid compact-kpi report-kpis-expanded">
                     <article className="kpi-card">
@@ -3240,139 +4689,158 @@ function App() {
                     Productos sin venta en el periodo: <strong>{salesReport.unsoldProducts.length}</strong>
                   </p>
 
-                  <div className="data-table-wrap tall">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Producto</th>
-                          <th>ID</th>
-                          <th>SKU</th>
-                          <th>Unidades</th>
-                          <th>Ingreso</th>
-                          <th>Costo Est.</th>
-                          <th>Utilidad Est.</th>
-                          <th>Margen</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {salesReport.productPerformance.map((item) => (
-                          <tr key={item.productId}>
-                            <td>{formatProductLabel(item.productName, item.productCommercialName)}</td>
-                            <td>{item.productId}</td>
-                            <td>{item.sku}</td>
-                            <td>{item.quantity}</td>
-                            <td>{moneyFormatter.format(item.revenue)}</td>
-                            <td>{moneyFormatter.format(item.estimatedCost)}</td>
-                            <td
-                              className={
-                                item.estimatedProfit >= 0 ? "value-positive" : "value-negative"
-                              }
-                            >
-                              {moneyFormatter.format(item.estimatedProfit)}
-                            </td>
-                            <td>{item.marginPct.toFixed(2)}%</td>
-                          </tr>
-                        ))}
-                        {salesReport.productPerformance.length === 0 && (
-                          <tr>
-                            <td colSpan={8} className="empty-cell">
-                              No hay datos para el periodo seleccionado.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                  <details className="compact-details">
+                    <summary>Desglose por producto</summary>
+                    <div className="details-content">
+                      <div className="data-table-wrap tall">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th>Producto</th>
+                              <th>ID</th>
+                              <th>SKU</th>
+                              <th>Unidades</th>
+                              <th>Ingreso</th>
+                              <th>Costo Est.</th>
+                              <th>Utilidad Est.</th>
+                              <th>Margen</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {salesReport.productPerformance.map((item) => (
+                              <tr key={item.productId}>
+                                <td>{formatProductLabel(item.productName, item.productCommercialName)}</td>
+                                <td>{item.productId}</td>
+                                <td>{item.sku}</td>
+                                <td>{item.quantity}</td>
+                                <td>{moneyFormatter.format(item.revenue)}</td>
+                                <td>{moneyFormatter.format(item.estimatedCost)}</td>
+                                <td
+                                  className={
+                                    item.estimatedProfit >= 0 ? "value-positive" : "value-negative"
+                                  }
+                                >
+                                  {moneyFormatter.format(item.estimatedProfit)}
+                                </td>
+                                <td>{item.marginPct.toFixed(2)}%</td>
+                              </tr>
+                            ))}
+                            {salesReport.productPerformance.length === 0 && (
+                              <tr>
+                                <td colSpan={8} className="empty-cell">
+                                  No hay datos para el periodo seleccionado.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </details>
 
-                  <h4 className="subsection-title">Tickets Registrados Con ID</h4>
-                  <div className="data-table-wrap tall">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Ticket ID</th>
-                          <th>Fecha</th>
-                          <th>Cliente</th>
-                          <th>Subtotal</th>
-                          <th>Descuento</th>
-                          <th>Total</th>
-                          <th>Items</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {salesReport.salesSummary.map((sale) => (
-                          <tr key={sale.saleId}>
-                            <td>#{sale.saleId}</td>
-                            <td>{datetimeFormatter.format(new Date(sale.createdAt))}</td>
-                            <td>{sale.customerName ?? "Mostrador"}</td>
-                            <td>{moneyFormatter.format(sale.subtotal)}</td>
-                            <td>{moneyFormatter.format(sale.discount)}</td>
-                            <td>{moneyFormatter.format(sale.total)}</td>
-                            <td>{sale.itemCount}</td>
-                          </tr>
-                        ))}
-                        {salesReport.salesSummary.length === 0 && (
-                          <tr>
-                            <td colSpan={7} className="empty-cell">
-                              Sin tickets para el periodo seleccionado.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                  <details className="compact-details">
+                    <summary>Tickets registrados</summary>
+                    <div className="details-content">
+                      <div className="data-table-wrap tall">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th>Ticket ID</th>
+                              <th>Fecha</th>
+                              <th>Cliente</th>
+                              <th>Subtotal</th>
+                              <th>Descuento</th>
+                              <th>Total</th>
+                              <th>Items</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {salesReport.salesSummary.map((sale) => (
+                              <tr key={sale.saleId}>
+                                <td>#{sale.saleId}</td>
+                                <td>{datetimeFormatter.format(new Date(sale.createdAt))}</td>
+                                <td>{sale.customerName ?? "Mostrador"}</td>
+                                <td>{moneyFormatter.format(sale.subtotal)}</td>
+                                <td>{moneyFormatter.format(sale.discount)}</td>
+                                <td>{moneyFormatter.format(sale.total)}</td>
+                                <td>{sale.itemCount}</td>
+                              </tr>
+                            ))}
+                            {salesReport.salesSummary.length === 0 && (
+                              <tr>
+                                <td colSpan={7} className="empty-cell">
+                                  Sin tickets para el periodo seleccionado.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </details>
 
-                  <h4 className="subsection-title">Movimientos De Inventario (Con ID)</h4>
-                  <div className="data-table-wrap tall">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Mov ID</th>
-                          <th>Producto ID</th>
-                          <th>Producto</th>
-                          <th>Cambio</th>
-                          <th>Stock Actual</th>
-                          <th>Min.</th>
-                          <th>Motivo</th>
-                          <th>Fecha</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {inventoryMovementsReport.map((movement) => (
-                          <tr key={movement.movementId}>
-                            <td>{movement.movementId}</td>
-                            <td>{movement.productId}</td>
-                            <td>
-                              {formatProductLabel(
-                                movement.productName,
-                                movement.productCommercialName,
-                              )}
-                              <small>{movement.productSku}</small>
-                            </td>
-                            <td className={movement.change < 0 ? "value-negative" : "value-positive"}>
-                              {movement.change > 0 ? `+${movement.change}` : movement.change}
-                            </td>
-                            <td>{movement.currentStock}</td>
-                            <td>{movement.minStock}</td>
-                            <td>{movement.reason}</td>
-                            <td>{datetimeFormatter.format(new Date(movement.createdAt))}</td>
-                          </tr>
-                        ))}
-                        {inventoryMovementsReport.length === 0 && (
-                          <tr>
-                            <td colSpan={8} className="empty-cell">
-                              Sin movimientos de inventario registrados.
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                  <details className="compact-details">
+                    <summary>Movimientos de inventario</summary>
+                    <div className="details-content">
+                      <div className="data-table-wrap tall">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th>Mov ID</th>
+                              <th>Producto ID</th>
+                              <th>Producto</th>
+                              <th>Lote</th>
+                              <th>Cambio</th>
+                              <th>Stock Actual</th>
+                              <th>Min.</th>
+                              <th>Motivo</th>
+                              <th>Fecha</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {inventoryMovementsReport.map((movement) => (
+                              <tr key={movement.movementId}>
+                                <td>{movement.movementId}</td>
+                                <td>{movement.productId}</td>
+                                <td>
+                                  {formatProductLabel(
+                                    movement.productName,
+                                    movement.productCommercialName,
+                                  )}
+                                  <small>{movement.productSku}</small>
+                                </td>
+                                <td>{movement.lotCode || "--"}</td>
+                                <td className={movement.change < 0 ? "value-negative" : "value-positive"}>
+                                  {movement.change > 0 ? `+${movement.change}` : movement.change}
+                                </td>
+                                <td>{movement.currentStock}</td>
+                                <td>{movement.minStock}</td>
+                                <td>{movement.reason}</td>
+                                <td>{datetimeFormatter.format(new Date(movement.createdAt))}</td>
+                              </tr>
+                            ))}
+                            {inventoryMovementsReport.length === 0 && (
+                              <tr>
+                                <td colSpan={9} className="empty-cell">
+                                  Sin movimientos de inventario registrados.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </details>
                 </>
               )}
             </article>
 
             <article className="surface" id="reorder-report-section">
-              <h3>Productos Necesarios (Reposicion)</h3>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Productos necesarios</h3>
+                </div>
+              </div>
               {loadingReports && <p className="muted-line">Calculando necesidad de reposicion...</p>}
               {!loadingReports && reorderReport && (
                 <>
@@ -3389,6 +4857,7 @@ function App() {
                           <th>Objetivo</th>
                           <th>Sugerido</th>
                           <th>Velocidad Dia</th>
+                          <th>Puntaje</th>
                           <th>Prioridad</th>
                         </tr>
                       </thead>
@@ -3403,6 +4872,7 @@ function App() {
                             <td>{item.targetStock}</td>
                             <td>{item.suggestedOrder}</td>
                             <td>{item.dailyVelocity.toFixed(2)}</td>
+                            <td>{item.criticalityScore.toFixed(1)}</td>
                             <td>
                               <span className={`status-chip ${item.priority.toLowerCase()}`}>
                                 {item.priority}
@@ -3412,7 +4882,7 @@ function App() {
                         ))}
                         {reorderReport.items.length === 0 && (
                           <tr>
-                            <td colSpan={6} className="empty-cell">
+                            <td colSpan={7} className="empty-cell">
                               No hay faltantes de medicamento en este momento.
                             </td>
                           </tr>
@@ -3420,13 +4890,24 @@ function App() {
                       </tbody>
                     </table>
                   </div>
+                  <ul className="compact-bullet-list muted-bullets">
+                    {reorderReport.highlights.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
                 </>
               )}
             </article>
 
             <article className="surface">
-              <h3>Analisis Operativo</h3>
-              <p className="muted-line">Fuente: {insightSource.toUpperCase()}</p>
+              <div className="surface-head compact">
+                <div>
+                  <h3>Analisis operativo</h3>
+                </div>
+                <span className={`status-pill ${insightSource === "aion" ? "accent" : "success"}`}>
+                  {insightSource}
+                </span>
+              </div>
               <ul className="insight-list">
                 {insights.map((insight) => (
                   <li key={insight}>{insight}</li>
@@ -3434,13 +4915,60 @@ function App() {
                 {insights.length === 0 && <li>Sin analisis disponible.</li>}
               </ul>
             </article>
+
+            <article className="surface">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Bitacora y caja</h3>
+                </div>
+              </div>
+              <p className="muted-line">
+                Caja actual:
+                {" "}
+                {cashOverview.openSession
+                  ? moneyFormatter.format(cashOverview.openSession.expectedAmount)
+                  : "sin caja abierta"}
+              </p>
+              <details className="compact-details" open>
+                <summary>Bitacora reciente</summary>
+                <div className="details-content">
+                  <div className="data-table-wrap medium">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Fecha</th>
+                          <th>Entidad</th>
+                          <th>Accion</th>
+                          <th>Mensaje</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLogs.map((log) => (
+                          <tr key={log.id}>
+                            <td>{datetimeFormatter.format(new Date(log.createdAt))}</td>
+                            <td>{log.entityType}</td>
+                            <td>{log.action}</td>
+                            <td>{log.message}</td>
+                          </tr>
+                        ))}
+                        {auditLogs.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="empty-cell">
+                              Sin movimientos en bitacora.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </details>
+            </article>
           </div>
         </section>
       )}
         </main>
       </div>
-
-      <footer className="app-credit">Power by Code Solutions Studio</footer>
     </div>
   );
 }

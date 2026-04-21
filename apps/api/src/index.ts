@@ -19,10 +19,19 @@ import { loadPrismaClientPackage } from "./prisma-client-package.js";
 import { prisma } from "./prisma.js";
 
 const prismaClientPackage = loadPrismaClientPackage();
-const { AppointmentStatus, ProductKind } = prismaClientPackage;
+const {
+  AppointmentStatus,
+  CashMovementType,
+  CashSessionStatus,
+  FollowUpStatus,
+  ProductKind,
+} = prismaClientPackage;
 
 type ProductKindCode = import("@prisma/client").ProductKind;
 type AppointmentStatusCode = import("@prisma/client").AppointmentStatus;
+type FollowUpStatusCode = import("@prisma/client").FollowUpStatus;
+type CashSessionStatusCode = import("@prisma/client").CashSessionStatus;
+type CashMovementTypeCode = import("@prisma/client").CashMovementType;
 
 class ApiError extends Error {
   status: number;
@@ -89,6 +98,7 @@ const inventoryKinds: ProductKindCode[] = [
 ];
 const serviceKind = ProductKind.MEDICAL_SERVICE;
 const expirationAlertDays = 45;
+const appointmentReminderMinutes = 60;
 
 const productBaseSchema = z.object({
   sku: z.string().min(2).max(40).optional(),
@@ -103,6 +113,7 @@ const productBaseSchema = z.object({
   stock: z.number().int().nonnegative().default(0),
   minStock: z.number().int().nonnegative().default(0),
   expiresAt: z.string().max(40).nullable().optional(),
+  lotCode: z.string().max(60).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -129,12 +140,17 @@ const productUpdateSchema = productBaseSchema
 const stockAdjustSchema = z.object({
   change: z.number().int(),
   reason: z.string().min(3).max(120),
+  lotCode: z.string().max(60).optional(),
+  expiresAt: z.string().max(40).nullable().optional(),
+  cost: z.number().nonnegative().optional(),
 });
 
 const saleCreateSchema = z.object({
   customerName: z.string().max(120).optional(),
   notes: z.string().max(500).optional(),
   discount: z.number().min(0).default(0),
+  amountPaid: z.number().min(0).optional(),
+  changeGiven: z.number().min(0).optional(),
   items: z
     .array(
       z.object({
@@ -147,6 +163,7 @@ const saleCreateSchema = z.object({
 
 const appointmentCreateSchema = z.object({
   patientName: z.string().min(2).max(120),
+  patientPhone: z.string().max(40).optional(),
   serviceType: z.string().min(2).max(120),
   notes: z.string().max(500).optional(),
   appointmentAt: z.string().datetime(),
@@ -159,6 +176,52 @@ const appointmentStatusSchema = z.object({
 const aiAdjustmentInputSchema = z.object({
   marketShift: z.number().min(-0.25).max(0.25).optional(),
   trigger: z.enum(["manual", "monthly-cutoff", "cost-increase"]).optional(),
+});
+
+const patientCreateSchema = z.object({
+  fullName: z.string().min(2).max(120),
+  phone: z.string().max(40).optional(),
+  notes: z.string().max(500).optional(),
+});
+
+const consultationCreateSchema = z.object({
+  patientId: z.number().int().positive(),
+  appointmentId: z.number().int().positive().optional(),
+  serviceProductId: z.number().int().positive().optional(),
+  serviceType: z.string().min(2).max(120),
+  summary: z.string().max(500).optional(),
+  diagnosis: z.string().max(500).optional(),
+  treatment: z.string().max(500).optional(),
+  observations: z.string().max(1000).optional(),
+  followUpAt: z.string().datetime().optional(),
+  followUpStatus: z.nativeEnum(FollowUpStatus).optional(),
+});
+
+const followUpStatusSchema = z.object({
+  status: z.nativeEnum(FollowUpStatus),
+});
+
+const cashSessionOpenSchema = z.object({
+  openingAmount: z.number().min(0).default(0),
+  notes: z.string().max(500).optional(),
+});
+
+const cashMovementCreateSchema = z.object({
+  type: z.nativeEnum(CashMovementType).refine(
+    (value) => value === CashMovementType.INCOME || value === CashMovementType.EXPENSE || value === CashMovementType.ADJUSTMENT,
+    { message: "Solo se permiten movimientos manuales de ingreso, egreso o ajuste." },
+  ),
+  amount: z.number().positive(),
+  reason: z.string().min(3).max(200),
+});
+
+const cashSessionCloseSchema = z.object({
+  countedAmount: z.number().min(0),
+  notes: z.string().max(500).optional(),
+});
+
+const assistantQuerySchema = z.object({
+  query: z.string().min(2).max(240),
 });
 
 function parseId(rawId: string): number {
@@ -227,6 +290,49 @@ function defaultUnitForKind(kind: ProductKindCode): string {
 }
 
 type PrismaTx = Prisma.TransactionClient;
+type PrismaDb = PrismaTx | typeof prisma;
+
+type SearchableProduct = {
+  id?: number;
+  sku: string;
+  name: string;
+  commercialName: string | null;
+  category: string | null;
+  kind?: ProductKindCode;
+  stock?: number;
+  minStock?: number;
+};
+
+type SearchIntent = {
+  wantsRestock: boolean;
+  wantsOutOfStock: boolean;
+  wantsExpiring: boolean;
+  wantsServices: boolean;
+  wantsInventory: boolean;
+  assistantTopic: "restock" | "top-sales" | "follow-up" | "sales-summary" | "general";
+  aliases: string[];
+};
+
+type OperationalAlertLevel = "info" | "warning" | "critical";
+
+type OperationalAlert = {
+  id: string;
+  type:
+    | "LOW_STOCK"
+    | "OUT_OF_STOCK"
+    | "EXPIRING"
+    | "UPCOMING_APPOINTMENT"
+    | "FOLLOW_UP"
+    | "LOW_ROTATION"
+    | "CASH_MISMATCH"
+    | "SALES_ANOMALY";
+  level: OperationalAlertLevel;
+  title: string;
+  message: string;
+  module: "inventory" | "appointments" | "reports" | "pos";
+  entityId?: number;
+  entityType?: string;
+};
 
 function stripDiacritics(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -302,26 +408,178 @@ function daysAgo(days: number): Date {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
-function scoreProductSearch(product: {
-  sku: string;
-  name: string;
-  commercialName: string | null;
-  category: string | null;
-}, query: string): number {
-  const q = query.toLowerCase();
-  const sku = product.sku.toLowerCase();
-  const name = product.name.toLowerCase();
-  const commercialName = (product.commercialName ?? "").toLowerCase();
-  const category = (product.category ?? "").toLowerCase();
+function normalizeSearchValue(value: string): string {
+  return stripDiacritics(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function uniqueTokens(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function levenshteinDistance(left: string, right: string): number {
+  if (left === right) {
+    return 0;
+  }
+
+  if (left.length === 0) {
+    return right.length;
+  }
+  if (right.length === 0) {
+    return left.length;
+  }
+
+  const previous = new Array<number>(right.length + 1).fill(0);
+  const current = new Array<number>(right.length + 1).fill(0);
+
+  for (let j = 0; j <= right.length; j += 1) {
+    previous[j] = j;
+  }
+
+  for (let i = 1; i <= left.length; i += 1) {
+    current[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      current[j] = Math.min(
+        current[j - 1] + 1,
+        previous[j] + 1,
+        previous[j - 1] + cost,
+      );
+    }
+
+    for (let j = 0; j <= right.length; j += 1) {
+      previous[j] = current[j];
+    }
+  }
+
+  return previous[right.length];
+}
+
+function inferSearchIntent(query: string): SearchIntent {
+  const normalized = normalizeSearchValue(query);
+  const tokens = uniqueTokens(normalized.split(" "));
+  const aliases = new Set<string>(tokens);
+  const keywordAliases: Record<string, string[]> = {
+    surtir: ["reabasto", "reponer", "faltante", "faltantes", "restock"],
+    agotado: ["sin stock", "stock cero", "agotados"],
+    antibiotico: ["amoxicilina", "azitromicina"],
+    curacion: ["gasas", "alcohol", "guantes", "jeringa", "inyeccion"],
+    servicio: ["consulta", "curacion", "nebulizacion", "chequeo"],
+    paciente: ["cita", "seguimiento", "consulta"],
+    caducidad: ["caduca", "vencido", "vencimiento", "expira"],
+  };
+
+  for (const token of tokens) {
+    for (const alias of keywordAliases[token] ?? []) {
+      aliases.add(alias);
+    }
+  }
+
+  const tokenSet = new Set(tokens);
+  return {
+    wantsRestock:
+      tokenSet.has("surtir") ||
+      tokenSet.has("reabasto") ||
+      tokenSet.has("reponer") ||
+      tokenSet.has("faltante"),
+    wantsOutOfStock:
+      tokenSet.has("agotado") ||
+      tokenSet.has("agotados") ||
+      (tokenSet.has("sin") && tokenSet.has("stock")),
+    wantsExpiring:
+      tokenSet.has("caducidad") ||
+      tokenSet.has("caduca") ||
+      tokenSet.has("vencido") ||
+      tokenSet.has("vencimiento"),
+    wantsServices:
+      tokenSet.has("servicio") ||
+      tokenSet.has("consulta") ||
+      tokenSet.has("curacion") ||
+      tokenSet.has("nebulizacion"),
+    wantsInventory:
+      tokenSet.has("inventario") ||
+      tokenSet.has("medicamento") ||
+      tokenSet.has("material") ||
+      tokenSet.has("producto"),
+    assistantTopic:
+      tokenSet.has("seguimiento")
+        ? "follow-up"
+        : tokenSet.has("vendidos") || (tokenSet.has("mas") && tokenSet.has("vendidos"))
+          ? "top-sales"
+          : tokenSet.has("ventas") && (tokenSet.has("dia") || tokenSet.has("hoy"))
+            ? "sales-summary"
+            : tokenSet.has("surtir") || tokenSet.has("reabasto")
+              ? "restock"
+              : "general",
+    aliases: [...aliases],
+  };
+}
+
+function scoreProductSearch(product: SearchableProduct, query: string): number {
+  const normalizedQuery = normalizeSearchValue(query);
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  const intent = inferSearchIntent(query);
+  const haystack = uniqueTokens([
+    normalizeSearchValue(product.name),
+    normalizeSearchValue(product.commercialName ?? ""),
+    normalizeSearchValue(product.sku),
+    normalizeSearchValue(product.category ?? ""),
+    normalizeSearchValue(product.kind ?? ""),
+  ]);
+  const compoundHaystack = haystack.join(" ");
 
   let score = 0;
-  if (name.startsWith(q)) score += 5;
-  if (commercialName.startsWith(q)) score += 5;
-  if (sku.startsWith(q)) score += 4;
-  if (name.includes(q)) score += 3;
-  if (commercialName.includes(q)) score += 3;
-  if (category.includes(q)) score += 2;
-  if (sku.includes(q)) score += 1;
+  if (compoundHaystack.startsWith(normalizedQuery)) {
+    score += 12;
+  }
+  if (compoundHaystack.includes(normalizedQuery)) {
+    score += 8;
+  }
+
+  for (const token of intent.aliases) {
+    if (!token) {
+      continue;
+    }
+
+    if (normalizeSearchValue(product.name).startsWith(token)) score += 8;
+    if (normalizeSearchValue(product.commercialName ?? "").startsWith(token)) score += 7;
+    if (normalizeSearchValue(product.sku).startsWith(token)) score += 6;
+    if (compoundHaystack.includes(token)) score += 4;
+
+    for (const hay of haystack) {
+      const candidateTokens = hay.split(" ").filter(Boolean);
+      if (candidateTokens.some((candidate) =>
+        candidate.length >= 4 &&
+        token.length >= 4 &&
+        levenshteinDistance(candidate, token) <= 1
+      )) {
+        score += 3;
+        break;
+      }
+    }
+  }
+
+  if (intent.wantsRestock && typeof product.stock === "number" && typeof product.minStock === "number") {
+    if (product.stock <= product.minStock) {
+      score += 12;
+    }
+  }
+  if (intent.wantsOutOfStock && product.stock === 0) {
+    score += 14;
+  }
+  if (intent.wantsServices && product.kind === ProductKind.MEDICAL_SERVICE) {
+    score += 10;
+  }
+  if (intent.wantsInventory && product.kind !== ProductKind.MEDICAL_SERVICE) {
+    score += 6;
+  }
+
   return score;
 }
 
@@ -459,7 +717,23 @@ async function buildPriceSuggestions(
   });
   const productNameById = new Map(products.map((product) => [product.id, product.name]));
 
-  const recentCostIncreaseByProduct = await getRecentCostIncreaseRatios();
+  const [recentCostIncreaseByProduct, recentPriceEvents] = await Promise.all([
+    getRecentCostIncreaseRatios(),
+    prisma.productPriceEvent.findMany({
+      where: {
+        createdAt: { gte: daysAgo(180) },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+  const priceHistoryByProduct = new Map<number, number[]>();
+  for (const event of recentPriceEvents) {
+    const history = priceHistoryByProduct.get(event.productId) ?? [];
+    if (history.length < 8) {
+      history.push(event.newPrice, event.previousPrice);
+    }
+    priceHistoryByProduct.set(event.productId, history);
+  }
 
   const externalSuggestions = await requestAionPriceAdjustments({
     marketShift,
@@ -480,19 +754,428 @@ async function buildPriceSuggestions(
     };
   }
 
-  const localSuggestions = products.map((product) =>
-    calculateSuggestedPublicPrice(
+  const localSuggestions = products.map((product) => {
+    const suggestion = calculateSuggestedPublicPrice(
       product,
       marketShift,
       recentCostIncreaseByProduct.get(product.id) ?? 0,
       trigger,
-    ),
-  );
+    );
+    const priceHistory = priceHistoryByProduct.get(product.id) ?? [];
+    if (priceHistory.length > 0) {
+      const ordered = [...priceHistory].sort((a, b) => a - b);
+      const median = ordered[Math.floor(ordered.length / 2)] ?? product.price;
+      const min = ordered[0] ?? product.price;
+      const max = ordered[ordered.length - 1] ?? product.price;
+
+      if (product.price < median * 0.85) {
+        suggestion.reason += ` Precio actual por debajo del historico reciente (mediana ${roundMoney(median)}).`;
+      } else if (product.price > median * 1.2) {
+        suggestion.reason += ` Precio actual por encima del historico reciente (mediana ${roundMoney(median)}).`;
+      } else if (max - min > 0) {
+        suggestion.reason += ` Banda historica reciente: ${roundMoney(min)}-${roundMoney(max)}.`;
+      }
+    }
+
+    return suggestion;
+  });
 
   return {
     source: "local",
     suggestions: localSuggestions,
   };
+}
+
+function buildDefaultLotCode(productSku: string, suffix = "LOT"): string {
+  const seed = normalizeSkuInput(`${productSku}-${suffix}`).slice(0, 50).replace(/-+$/g, "");
+  return seed.length >= 3 ? seed : `LOT-${Date.now()}`;
+}
+
+function expirySortValue(expiresAt: Date | null | undefined): number {
+  return expiresAt ? new Date(expiresAt).getTime() : Number.MAX_SAFE_INTEGER;
+}
+
+function computeCashDelta(type: CashMovementTypeCode, amount: number): number {
+  if (type === CashMovementType.EXPENSE) {
+    return -Math.abs(amount);
+  }
+  if (type === CashMovementType.SALE || type === CashMovementType.INCOME || type === CashMovementType.ADJUSTMENT) {
+    return Math.abs(amount);
+  }
+  return 0;
+}
+
+async function writeAuditLog(
+  tx: PrismaTx,
+  entry: {
+    entityType: string;
+    entityId?: number | null;
+    action: string;
+    message: string;
+    payload?: Prisma.InputJsonValue;
+  },
+) {
+  await tx.auditLog.create({
+    data: {
+      entityType: entry.entityType,
+      entityId: entry.entityId ?? null,
+      action: entry.action,
+      message: entry.message,
+      payload: entry.payload,
+    },
+  });
+}
+
+async function findOrCreatePatient(
+  tx: PrismaTx,
+  payload: {
+    fullName: string;
+    phone?: string | null;
+    notes?: string | null;
+  },
+) {
+  const fullName = payload.fullName.trim();
+  const normalizedName = normalizeSearchValue(fullName);
+  const normalizedPhone = normalizeSearchValue(payload.phone ?? "");
+
+  const candidates = await tx.patient.findMany({
+    where: {
+      fullName: {
+        contains: fullName,
+      },
+    },
+    take: 20,
+    orderBy: { createdAt: "asc" },
+  });
+
+  const existing = candidates.find((patient) => {
+    const sameName = normalizeSearchValue(patient.fullName) === normalizedName;
+    if (!sameName) {
+      return false;
+    }
+
+    if (!normalizedPhone) {
+      return true;
+    }
+
+    return normalizeSearchValue(patient.phone ?? "") === normalizedPhone;
+  });
+
+  if (existing) {
+    if (!existing.phone && payload.phone) {
+      return tx.patient.update({
+        where: { id: existing.id },
+        data: { phone: payload.phone },
+      });
+    }
+
+    return existing;
+  }
+
+  return tx.patient.create({
+    data: {
+      fullName,
+      phone: payload.phone?.trim() || null,
+      notes: payload.notes?.trim() || null,
+    },
+  });
+}
+
+async function ensureFallbackLotForProduct(
+  tx: PrismaTx,
+  product: {
+    id: number;
+    sku: string;
+    kind: ProductKindCode;
+    stock: number;
+    cost: number;
+    expiresAt: Date | null;
+  },
+) {
+  if (product.kind === serviceKind || product.stock <= 0) {
+    return;
+  }
+
+  const existingLots = await tx.inventoryLot.count({
+    where: {
+      productId: product.id,
+      quantity: { gt: 0 },
+    },
+  });
+
+  if (existingLots > 0) {
+    return;
+  }
+
+  await tx.inventoryLot.create({
+    data: {
+      productId: product.id,
+      lotCode: buildDefaultLotCode(product.sku, `LEGACY-${product.id}`),
+      quantity: product.stock,
+      cost: product.cost,
+      expiresAt: product.kind === ProductKind.MEDICATION ? product.expiresAt : null,
+    },
+  });
+}
+
+async function syncProductFromLots(tx: PrismaTx, productId: number) {
+  const product = await tx.product.findUnique({
+    where: { id: productId },
+    include: {
+      lots: {
+        where: { quantity: { gt: 0 } },
+      },
+    },
+  });
+
+  if (!product || product.kind === serviceKind) {
+    return product;
+  }
+
+  const sortedLots = [...product.lots].sort(
+    (left, right) => expirySortValue(left.expiresAt) - expirySortValue(right.expiresAt),
+  );
+  const stock = sortedLots.reduce((sum, lot) => sum + lot.quantity, 0);
+  const nextExpiry =
+    product.kind === ProductKind.MEDICATION
+      ? sortedLots.find((lot) => lot.expiresAt)?.expiresAt ?? null
+      : null;
+
+  return tx.product.update({
+    where: { id: productId },
+    data: {
+      stock,
+      expiresAt: nextExpiry,
+    },
+  });
+}
+
+async function increaseInventoryLot(
+  tx: PrismaTx,
+  product: {
+    id: number;
+    sku: string;
+    kind: ProductKindCode;
+    cost: number;
+    expiresAt: Date | null;
+  },
+  payload: {
+    quantity: number;
+    lotCode?: string | null;
+    expiresAt?: Date | null;
+    cost?: number | null;
+  },
+) {
+  if (payload.quantity <= 0 || product.kind === serviceKind) {
+    return null;
+  }
+
+  const lotCode = payload.lotCode?.trim()
+    ? normalizeSkuInput(payload.lotCode)
+    : buildDefaultLotCode(product.sku, new Date().toISOString().slice(0, 10));
+  const lot = await tx.inventoryLot.findUnique({
+    where: {
+      productId_lotCode: {
+        productId: product.id,
+        lotCode,
+      },
+    },
+  });
+
+  if (lot) {
+    await tx.inventoryLot.update({
+      where: { id: lot.id },
+      data: {
+        quantity: { increment: payload.quantity },
+        cost: payload.cost ?? lot.cost,
+        expiresAt:
+          product.kind === ProductKind.MEDICATION
+            ? payload.expiresAt ?? lot.expiresAt ?? product.expiresAt
+            : null,
+      },
+    });
+  } else {
+    await tx.inventoryLot.create({
+      data: {
+        productId: product.id,
+        lotCode,
+        quantity: payload.quantity,
+        cost: payload.cost ?? product.cost,
+        expiresAt:
+          product.kind === ProductKind.MEDICATION
+            ? payload.expiresAt ?? product.expiresAt
+            : null,
+      },
+    });
+  }
+
+  await syncProductFromLots(tx, product.id);
+  return lotCode;
+}
+
+async function consumeInventoryLots(
+  tx: PrismaTx,
+  product: {
+    id: number;
+    sku: string;
+    kind: ProductKindCode;
+    stock: number;
+    cost: number;
+    expiresAt: Date | null;
+  },
+  quantity: number,
+) {
+  if (quantity <= 0 || product.kind === serviceKind) {
+    return [];
+  }
+
+  await ensureFallbackLotForProduct(tx, product);
+  const lots = await tx.inventoryLot.findMany({
+    where: {
+      productId: product.id,
+      quantity: { gt: 0 },
+    },
+  });
+
+  const sortedLots = [...lots].sort(
+    (left, right) => expirySortValue(left.expiresAt) - expirySortValue(right.expiresAt),
+  );
+
+  let remaining = quantity;
+  const touchedLotCodes: string[] = [];
+
+  for (const lot of sortedLots) {
+    if (remaining <= 0) {
+      break;
+    }
+    const take = Math.min(remaining, lot.quantity);
+    if (take <= 0) {
+      continue;
+    }
+
+    await tx.inventoryLot.update({
+      where: { id: lot.id },
+      data: {
+        quantity: {
+          decrement: take,
+        },
+      },
+    });
+    touchedLotCodes.push(lot.lotCode);
+    remaining -= take;
+  }
+
+  if (remaining > 0) {
+    throw new ApiError(400, `No hay lotes suficientes para ${product.sku}.`);
+  }
+
+  await syncProductFromLots(tx, product.id);
+  return uniqueTokens(touchedLotCodes);
+}
+
+async function getOpenCashSession(db: PrismaDb) {
+  return db.cashSession.findFirst({
+    where: { status: CashSessionStatus.OPEN },
+    include: {
+      movements: {
+        orderBy: { createdAt: "desc" },
+        take: 20,
+      },
+    },
+    orderBy: { openedAt: "desc" },
+  });
+}
+
+async function appendCashMovement(
+  tx: PrismaTx,
+  sessionId: number,
+  payload: {
+    type: CashMovementTypeCode;
+    amount: number;
+    reason: string;
+    saleId?: number;
+  },
+) {
+  const delta = computeCashDelta(payload.type, payload.amount);
+  const movement = await tx.cashMovement.create({
+    data: {
+      sessionId,
+      saleId: payload.saleId,
+      type: payload.type,
+      amount: roundMoney(payload.amount),
+      reason: payload.reason,
+    },
+  });
+
+  if (delta !== 0) {
+    await tx.cashSession.update({
+      where: { id: sessionId },
+      data: {
+        expectedAmount: {
+          increment: roundMoney(delta),
+        },
+      },
+    });
+  }
+
+  return movement;
+}
+
+async function buildCashOverview() {
+  const [openSession, lastClosedSession] = await Promise.all([
+    prisma.cashSession.findFirst({
+      where: { status: CashSessionStatus.OPEN },
+      include: {
+        movements: {
+          orderBy: { createdAt: "desc" },
+          take: 20,
+        },
+      },
+      orderBy: { openedAt: "desc" },
+    }),
+    prisma.cashSession.findFirst({
+      where: { status: CashSessionStatus.CLOSED },
+      include: {
+        movements: {
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        },
+      },
+      orderBy: { closedAt: "desc" },
+    }),
+  ]);
+
+  return {
+    openSession,
+    lastClosedSession,
+  };
+}
+
+async function buildPendingFollowUps(take = 20) {
+  const followUps = await prisma.consultation.findMany({
+    where: {
+      followUpAt: { not: null },
+      followUpStatus: FollowUpStatus.PENDING,
+    },
+    include: {
+      patient: true,
+      appointment: true,
+    },
+    orderBy: { followUpAt: "asc" },
+    take,
+  });
+
+  return followUps.map((item) => ({
+    id: item.id,
+    patientId: item.patientId,
+    patientName: item.patient.fullName,
+    patientPhone: item.patient.phone,
+    serviceType: item.serviceType,
+    followUpAt: item.followUpAt?.toISOString() ?? null,
+    status: item.followUpStatus,
+    summary: item.summary,
+    appointmentId: item.appointmentId,
+  }));
 }
 
 function resolveSqliteDatabaseFile(databaseUrl: string): string {
@@ -610,17 +1293,159 @@ function startAutomaticBackups() {
 }
 
 async function ensureSchemaCompatibility() {
-  try {
-    await prisma.$executeRawUnsafe(
-      'ALTER TABLE "Product" ADD COLUMN "commercialName" TEXT',
-    );
-    console.log("Columna commercialName agregada a Product.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (message.toLowerCase().includes("duplicate column name")) {
-      return;
+  const compatibilityStatements = [
+    'ALTER TABLE "Product" ADD COLUMN "commercialName" TEXT',
+    'ALTER TABLE "Sale" ADD COLUMN "amountPaid" REAL',
+    'ALTER TABLE "Sale" ADD COLUMN "changeGiven" REAL',
+    'ALTER TABLE "Appointment" ADD COLUMN "patientId" INTEGER',
+    'ALTER TABLE "Appointment" ADD COLUMN "patientPhone" TEXT',
+    'ALTER TABLE "InventoryMovement" ADD COLUMN "lotCode" TEXT',
+    `CREATE TABLE IF NOT EXISTS "Patient" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "fullName" TEXT NOT NULL,
+      "phone" TEXT,
+      "notes" TEXT,
+      "lastVisitAt" DATETIME,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "Patient_fullName_idx" ON "Patient"("fullName")',
+    `CREATE TABLE IF NOT EXISTS "Consultation" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "patientId" INTEGER NOT NULL,
+      "appointmentId" INTEGER,
+      "serviceProductId" INTEGER,
+      "serviceType" TEXT NOT NULL,
+      "summary" TEXT,
+      "diagnosis" TEXT,
+      "treatment" TEXT,
+      "observations" TEXT,
+      "followUpAt" DATETIME,
+      "followUpStatus" TEXT NOT NULL DEFAULT 'NONE',
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS "Consultation_appointmentId_key" ON "Consultation"("appointmentId")',
+    'CREATE INDEX IF NOT EXISTS "Consultation_patientId_createdAt_idx" ON "Consultation"("patientId","createdAt")',
+    'CREATE INDEX IF NOT EXISTS "Consultation_followUpAt_followUpStatus_idx" ON "Consultation"("followUpAt","followUpStatus")',
+    `CREATE TABLE IF NOT EXISTS "ProductPriceEvent" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "previousPrice" REAL NOT NULL,
+      "newPrice" REAL NOT NULL,
+      "changePct" REAL NOT NULL,
+      "reason" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    `CREATE TABLE IF NOT EXISTS "InventoryLot" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "productId" INTEGER NOT NULL,
+      "lotCode" TEXT NOT NULL,
+      "expiresAt" DATETIME,
+      "quantity" INTEGER NOT NULL DEFAULT 0,
+      "cost" REAL NOT NULL DEFAULT 0,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE UNIQUE INDEX IF NOT EXISTS "InventoryLot_productId_lotCode_key" ON "InventoryLot"("productId","lotCode")',
+    'CREATE INDEX IF NOT EXISTS "InventoryLot_productId_expiresAt_idx" ON "InventoryLot"("productId","expiresAt")',
+    `CREATE TABLE IF NOT EXISTS "CashSession" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "status" TEXT NOT NULL DEFAULT 'OPEN',
+      "openingAmount" REAL NOT NULL DEFAULT 0,
+      "expectedAmount" REAL NOT NULL DEFAULT 0,
+      "countedAmount" REAL,
+      "difference" REAL,
+      "notes" TEXT,
+      "openedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "closedAt" DATETIME
+    )`,
+    'CREATE INDEX IF NOT EXISTS "CashSession_status_openedAt_idx" ON "CashSession"("status","openedAt")',
+    `CREATE TABLE IF NOT EXISTS "CashMovement" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "sessionId" INTEGER NOT NULL,
+      "saleId" INTEGER,
+      "type" TEXT NOT NULL,
+      "amount" REAL NOT NULL,
+      "reason" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "CashMovement_sessionId_createdAt_idx" ON "CashMovement"("sessionId","createdAt")',
+    `CREATE TABLE IF NOT EXISTS "AuditLog" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "entityType" TEXT NOT NULL,
+      "entityId" INTEGER,
+      "action" TEXT NOT NULL,
+      "message" TEXT NOT NULL,
+      "payload" JSONB,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "AuditLog_entityType_createdAt_idx" ON "AuditLog"("entityType","createdAt")',
+    'CREATE INDEX IF NOT EXISTS "Appointment_appointmentAt_status_idx" ON "Appointment"("appointmentAt","status")',
+    'CREATE INDEX IF NOT EXISTS "Appointment_patientId_idx" ON "Appointment"("patientId")',
+  ];
+
+  for (const statement of compatibilityStatements) {
+    try {
+      await prisma.$executeRawUnsafe(statement);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (
+        message.includes("duplicate column name") ||
+        message.includes("already exists")
+      ) {
+        continue;
+      }
+      throw error;
     }
-    throw error;
+  }
+
+  const legacyProducts = await prisma.product.findMany({
+    where: {
+      kind: { in: inventoryKinds },
+      unit: { not: "servicio" },
+      stock: { gt: 0 },
+    },
+    select: {
+      id: true,
+      sku: true,
+      kind: true,
+      stock: true,
+      cost: true,
+      expiresAt: true,
+    },
+  });
+
+  for (const product of legacyProducts) {
+    await prisma.$transaction(async (tx) => {
+      await ensureFallbackLotForProduct(tx, product);
+      await syncProductFromLots(tx, product.id);
+    });
+  }
+
+  const legacyAppointments = await prisma.appointment.findMany({
+    where: { patientId: null },
+    select: {
+      id: true,
+      patientName: true,
+      patientPhone: true,
+      notes: true,
+    },
+  });
+
+  for (const appointment of legacyAppointments) {
+    await prisma.$transaction(async (tx) => {
+      const patient = await findOrCreatePatient(tx, {
+        fullName: appointment.patientName,
+        phone: appointment.patientPhone,
+        notes: appointment.notes,
+      });
+
+      await tx.appointment.update({
+        where: { id: appointment.id },
+        data: { patientId: patient.id },
+      });
+    });
   }
 }
 
@@ -717,6 +1542,26 @@ async function buildSalesReport(from: Date, to: Date) {
     ? roundPercent(estimatedGrossProfit / totalRevenue)
     : 0;
 
+  const dailyAccumulator = new Map<string, { date: string; totalRevenue: number; totalSales: number }>();
+  for (const sale of sales) {
+    const dateKey = sale.createdAt.toISOString().slice(0, 10);
+    const bucket = dailyAccumulator.get(dateKey) ?? {
+      date: dateKey,
+      totalRevenue: 0,
+      totalSales: 0,
+    };
+    bucket.totalRevenue += sale.total;
+    bucket.totalSales += 1;
+    dailyAccumulator.set(dateKey, bucket);
+  }
+  const dailySales = [...dailyAccumulator.values()]
+    .map((item) => ({
+      date: item.date,
+      totalRevenue: roundMoney(item.totalRevenue),
+      totalSales: item.totalSales,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
   const salesSummary = sales
     .map((sale) => {
       const itemCount = sale.items.reduce((sum, item) => sum + item.quantity, 0);
@@ -792,6 +1637,76 @@ async function buildSalesReport(from: Date, to: Date) {
     ? Number((totalItemsSold / totalSales).toFixed(2))
     : 0;
 
+  const anomalies: Array<{
+    type: "SPIKE" | "DROP" | "DISCOUNT" | "LOW_ACTIVITY";
+    message: string;
+    severity: OperationalAlertLevel;
+  }> = [];
+  if (dailySales.length >= 4) {
+    const lastDay = dailySales[dailySales.length - 1];
+    const baseline = dailySales.slice(0, -1);
+    const baselineRevenue =
+      baseline.reduce((sum, item) => sum + item.totalRevenue, 0) / Math.max(1, baseline.length);
+    const baselineTickets =
+      baseline.reduce((sum, item) => sum + item.totalSales, 0) / Math.max(1, baseline.length);
+
+    if (baselineRevenue > 0 && lastDay.totalRevenue >= baselineRevenue * 1.65) {
+      anomalies.push({
+        type: "SPIKE",
+        severity: "warning",
+        message:
+          `Ventas de ${lastDay.date} por ${roundMoney(lastDay.totalRevenue)}; ` +
+          `superan el promedio reciente de ${roundMoney(baselineRevenue)}.`,
+      });
+    }
+
+    if (baselineRevenue > 0 && lastDay.totalRevenue <= baselineRevenue * 0.5) {
+      anomalies.push({
+        type: "DROP",
+        severity: "critical",
+        message:
+          `Ventas de ${lastDay.date} por ${roundMoney(lastDay.totalRevenue)}; ` +
+          `quedaron por debajo del promedio reciente de ${roundMoney(baselineRevenue)}.`,
+      });
+    }
+
+    if (baselineTickets > 0 && lastDay.totalSales <= Math.max(1, baselineTickets * 0.6)) {
+      anomalies.push({
+        type: "LOW_ACTIVITY",
+        severity: "warning",
+        message:
+          `Solo se registraron ${lastDay.totalSales} tickets el ${lastDay.date}; ` +
+          `promedio reciente ${baselineTickets.toFixed(1)}.`,
+      });
+    }
+  }
+
+  if (grossRevenue > 0 && totalDiscount / grossRevenue >= 0.18) {
+    anomalies.push({
+      type: "DISCOUNT",
+      severity: "warning",
+      message:
+        `El descuento acumulado representa ${roundPercent(totalDiscount / grossRevenue)}% del bruto; revisa promociones y autorizaciones.`,
+    });
+  }
+
+  const topByRevenue = topProducts[0];
+  const topByUnits = bestSellingProducts[0];
+  const lowRotationLead = leastSellingProducts[0] ?? unsoldProducts[0] ?? null;
+  const highlights = [
+    `Ingreso neto del periodo: $${totalRevenue.toFixed(2)} en ${totalSales} ventas.`,
+    topByRevenue
+      ? `Mayor aportacion por ingreso: ${topByRevenue.productName} con $${topByRevenue.revenue.toFixed(2)}.`
+      : "Sin productos destacados por ingreso en el periodo.",
+    topByUnits
+      ? `Mayor rotacion por unidades: ${topByUnits.productName} con ${topByUnits.quantity} unidades.`
+      : "Sin rotacion destacada en el periodo.",
+    lowRotationLead
+      ? `Revision sugerida para baja rotacion: ${lowRotationLead.productName} (${lowRotationLead.quantity} unidades).`
+      : "Sin rezagos de rotacion identificados.",
+    anomalies[0]?.message ?? "Sin anomalias operativas basicas detectadas en ventas.",
+  ];
+
   return {
     range: {
       from: from.toISOString(),
@@ -812,6 +1727,9 @@ async function buildSalesReport(from: Date, to: Date) {
     bestSellingProducts,
     leastSellingProducts,
     unsoldProducts,
+    dailySales,
+    anomalies,
+    highlights,
     productPerformance: performanceRows,
     salesSummary,
     sales,
@@ -846,6 +1764,7 @@ async function listRecentInventoryMovements(take = 120) {
     productCommercialName: row.product.commercialName,
     change: row.change,
     reason: row.reason,
+    lotCode: row.lotCode,
     createdAt: row.createdAt.toISOString(),
     currentStock: row.product.stock,
     minStock: row.product.minStock,
@@ -920,6 +1839,7 @@ async function buildReorderReport(days: number, coverageDays: number) {
         sku: product.sku,
         name: product.name,
         commercialName: product.commercialName,
+        kind: product.kind,
         category: product.category,
         stock: product.stock,
         minStock: product.minStock,
@@ -928,6 +1848,12 @@ async function buildReorderReport(days: number, coverageDays: number) {
         soldInPeriod,
         dailyVelocity: Number(dailyVelocity.toFixed(2)),
         priority,
+        criticalityScore: roundMoney(
+          suggestedOrder * 1.8 +
+            dailyVelocity * 6 +
+            (product.stock === 0 ? 12 : 0) +
+            (product.kind === ProductKind.MEDICAL_SUPPLY ? 2 : 0),
+        ),
       };
     })
     .filter((item): item is NonNullable<typeof item> => item !== null)
@@ -935,6 +1861,9 @@ async function buildReorderReport(days: number, coverageDays: number) {
       const priorityWeight = { CRITICAL: 3, HIGH: 2, MEDIUM: 1 };
       if (priorityWeight[a.priority] !== priorityWeight[b.priority]) {
         return priorityWeight[b.priority] - priorityWeight[a.priority];
+      }
+      if (a.criticalityScore !== b.criticalityScore) {
+        return b.criticalityScore - a.criticalityScore;
       }
       if (a.suggestedOrder !== b.suggestedOrder) {
         return b.suggestedOrder - a.suggestedOrder;
@@ -954,7 +1883,334 @@ async function buildReorderReport(days: number, coverageDays: number) {
     coverageDays: desiredCoverageDays,
     totalItems: items.length,
     totalUnitsSuggested,
+    highlights: [
+      items[0]
+        ? `Prioridad principal: ${items[0].name} con ${items[0].suggestedOrder} unidades sugeridas.`
+        : "No hay productos urgentes por surtir.",
+      items.find((item) => item.kind === ProductKind.MEDICAL_SUPPLY)
+        ? `Material quirurgico prioritario: ${items.find((item) => item.kind === ProductKind.MEDICAL_SUPPLY)?.name}.`
+        : "Sin material quirurgico critico por surtir.",
+      `Cobertura objetivo: ${desiredCoverageDays} dias con base en ${periodDays} dias analizados.`,
+    ],
     items,
+  };
+}
+
+async function buildOperationalAlerts(limit = 40) {
+  const now = new Date();
+  const appointmentReminderLimit = new Date(
+    now.getTime() + appointmentReminderMinutes * 60 * 1000,
+  );
+  const [products, upcomingAppointments, pendingFollowUps, cashOverview, salesReport] = await Promise.all([
+    prisma.product.findMany({
+      where: {
+        isActive: true,
+        kind: { in: inventoryKinds },
+        unit: { not: "servicio" },
+      },
+      orderBy: { name: "asc" },
+    }),
+    prisma.appointment.findMany({
+      where: {
+        status: AppointmentStatus.SCHEDULED,
+        appointmentAt: {
+          gte: now,
+          lte: appointmentReminderLimit,
+        },
+      },
+      orderBy: { appointmentAt: "asc" },
+      take: 10,
+    }),
+    buildPendingFollowUps(12),
+    buildCashOverview(),
+    buildSalesReport(daysAgo(14), new Date()),
+  ]);
+
+  const lowRotationIds = salesReport.totalSales > 0
+    ? new Set([
+        ...salesReport.leastSellingProducts.slice(0, 5).map((item) => item.productId),
+        ...salesReport.unsoldProducts.slice(0, 5).map((item) => item.productId),
+      ])
+    : new Set<number>();
+
+  const alerts: OperationalAlert[] = [];
+  for (const product of products) {
+    if (product.stock === 0) {
+      alerts.push({
+        id: `product-out-${product.id}`,
+        type: "OUT_OF_STOCK",
+        level: "critical",
+        title: `${product.name} agotado`,
+        message: `SKU ${product.sku} sin existencia disponible.`,
+        module: "inventory",
+        entityId: product.id,
+        entityType: "product",
+      });
+      continue;
+    }
+
+    if (product.stock <= product.minStock) {
+      alerts.push({
+        id: `product-low-${product.id}`,
+        type: "LOW_STOCK",
+        level: product.stock <= Math.max(1, Math.floor(product.minStock / 2)) ? "critical" : "warning",
+        title: `${product.name} bajo stock`,
+        message: `Stock ${product.stock}/${product.minStock}.`,
+        module: "inventory",
+        entityId: product.id,
+        entityType: "product",
+      });
+    }
+
+    if (lowRotationIds.has(product.id) && product.stock > Math.max(5, product.minStock)) {
+      alerts.push({
+        id: `product-rotation-${product.id}`,
+        type: "LOW_ROTATION",
+        level: "info",
+        title: `${product.name} con baja rotacion`,
+        message: `Tiene stock ${product.stock} y poca salida reciente.`,
+        module: "reports",
+        entityId: product.id,
+        entityType: "product",
+      });
+    }
+  }
+
+  const expiringLots = await prisma.inventoryLot.findMany({
+    where: {
+      quantity: { gt: 0 },
+      expiresAt: { not: null, lte: new Date(Date.now() + expirationAlertDays * 24 * 60 * 60 * 1000) },
+      product: {
+        kind: ProductKind.MEDICATION,
+        isActive: true,
+      },
+    },
+    include: {
+      product: true,
+    },
+    orderBy: { expiresAt: "asc" },
+    take: 12,
+  });
+
+  for (const lot of expiringLots) {
+    const daysToExpire = Math.ceil(
+      ((lot.expiresAt?.getTime() ?? 0) - Date.now()) / (24 * 60 * 60 * 1000),
+    );
+    alerts.push({
+      id: `lot-exp-${lot.id}`,
+      type: "EXPIRING",
+      level: daysToExpire < 0 ? "critical" : "warning",
+      title: `${lot.product.name} proximo a caducar`,
+      message: `Lote ${lot.lotCode} con ${lot.quantity} unidades; vence ${lot.expiresAt?.toISOString().slice(0, 10)}.`,
+      module: "inventory",
+      entityId: lot.productId,
+      entityType: "product",
+    });
+  }
+
+  for (const appointment of upcomingAppointments) {
+    const minutesToAppointment = Math.max(
+      0,
+      Math.round((appointment.appointmentAt.getTime() - now.getTime()) / 60_000),
+    );
+    alerts.push({
+      id: `appt-${appointment.id}`,
+      type: "UPCOMING_APPOINTMENT",
+      level: minutesToAppointment <= 15 ? "warning" : "info",
+      title: `${appointment.patientName} tiene consulta proxima`,
+      message:
+        `${appointment.serviceType} en ${minutesToAppointment} min ` +
+        `(${appointment.appointmentAt.toISOString()}).`,
+      module: "appointments",
+      entityId: appointment.id,
+      entityType: "appointment",
+    });
+  }
+
+  for (const followUp of pendingFollowUps) {
+    alerts.push({
+      id: `follow-up-${followUp.id}`,
+      type: "FOLLOW_UP",
+      level: "warning",
+      title: `${followUp.patientName} con seguimiento pendiente`,
+      message: `${followUp.serviceType} con seguimiento ${followUp.followUpAt?.slice(0, 10) ?? "pendiente"}.`,
+      module: "appointments",
+      entityId: followUp.id,
+      entityType: "consultation",
+    });
+  }
+
+  if (cashOverview.lastClosedSession && Math.abs(cashOverview.lastClosedSession.difference ?? 0) > 0.01) {
+    alerts.push({
+      id: `cash-${cashOverview.lastClosedSession.id}`,
+      type: "CASH_MISMATCH",
+      level: Math.abs(cashOverview.lastClosedSession.difference ?? 0) >= 100 ? "critical" : "warning",
+      title: "Caja descuadrada en ultimo corte",
+      message:
+        `Esperado ${roundMoney(cashOverview.lastClosedSession.expectedAmount)} vs contado ${roundMoney(cashOverview.lastClosedSession.countedAmount ?? 0)}.`,
+      module: "pos",
+      entityId: cashOverview.lastClosedSession.id,
+      entityType: "cashSession",
+    });
+  }
+
+  for (const anomaly of salesReport.anomalies) {
+    alerts.push({
+      id: `sales-${anomaly.type}-${alerts.length + 1}`,
+      type: "SALES_ANOMALY",
+      level: anomaly.severity,
+      title: "Anomalia basica en ventas",
+      message: anomaly.message,
+      module: "reports",
+      entityType: "salesReport",
+    });
+  }
+
+  const levelWeight = { critical: 3, warning: 2, info: 1 };
+  const sorted = alerts.sort((a, b) => {
+    if (levelWeight[a.level] !== levelWeight[b.level]) {
+      return levelWeight[b.level] - levelWeight[a.level];
+    }
+    return a.title.localeCompare(b.title);
+  });
+
+  return {
+    total: sorted.length,
+    alerts: sorted.slice(0, limit),
+  };
+}
+
+async function searchPatients(query: string) {
+  const normalizedQuery = normalizeSearchValue(query);
+  const patients = await prisma.patient.findMany({
+    orderBy: { updatedAt: "desc" },
+    take: 120,
+  });
+
+  return patients
+    .map((patient) => {
+      const score =
+        scoreProductSearch(
+          {
+            sku: patient.phone ?? "",
+            name: patient.fullName,
+            commercialName: null,
+            category: patient.notes ?? "",
+          },
+          normalizedQuery,
+        );
+
+      return {
+        ...patient,
+        relevance: score,
+      };
+    })
+    .filter((patient) => patient.relevance > 0 || !normalizedQuery)
+    .sort((a, b) => b.relevance - a.relevance || a.fullName.localeCompare(b.fullName));
+}
+
+async function buildAssistantResponse(query: string) {
+  const intent = inferSearchIntent(query);
+  const normalizedQuery = normalizeSearchValue(query);
+
+  if (intent.assistantTopic === "restock") {
+    const reorder = await buildReorderReport(30, 14);
+    const topItems = reorder.items.slice(0, 5).map((item) =>
+      `${item.name}: surtir ${item.suggestedOrder} unidades (${item.priority}).`
+    );
+
+    return {
+      topic: "restock",
+      title: "Surtido recomendado",
+      summary:
+        reorder.totalItems > 0
+          ? `Hoy conviene priorizar ${reorder.totalItems} productos y ${reorder.totalUnitsSuggested} unidades sugeridas.`
+          : "Hoy no hay productos urgentes por surtir.",
+      bullets: topItems,
+      records: reorder.items.slice(0, 8),
+    };
+  }
+
+  if (intent.assistantTopic === "top-sales") {
+    const report = await buildSalesReport(daysAgo(7), new Date());
+    return {
+      topic: "top-sales",
+      title: "Mas vendidos de la semana",
+      summary: `En los ultimos 7 dias hubo ${report.totalSales} ventas y ${report.totalItemsSold} unidades.`,
+      bullets: report.bestSellingProducts.slice(0, 5).map((item) =>
+        `${item.productName}: ${item.quantity} unidades y $${item.revenue.toFixed(2)}.`
+      ),
+      records: report.bestSellingProducts.slice(0, 8),
+    };
+  }
+
+  if (intent.assistantTopic === "follow-up") {
+    const followUps = await buildPendingFollowUps(10);
+    return {
+      topic: "follow-up",
+      title: "Seguimientos pendientes",
+      summary:
+        followUps.length > 0
+          ? `${followUps.length} pacientes requieren seguimiento.`
+          : "No hay seguimientos pendientes.",
+      bullets: followUps.map((item) =>
+        `${item.patientName}: ${item.serviceType} ${item.followUpAt ? `(${item.followUpAt.slice(0, 10)})` : ""}`.trim()
+      ),
+      records: followUps,
+    };
+  }
+
+  if (intent.assistantTopic === "sales-summary") {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const report = await buildSalesReport(todayStart, new Date());
+    return {
+      topic: "sales-summary",
+      title: "Resumen de ventas del dia",
+      summary:
+        `Hoy llevas ${report.totalSales} ventas por $${report.totalRevenue.toFixed(2)} ` +
+        `con utilidad estimada de $${report.estimatedGrossProfit.toFixed(2)}.`,
+      bullets: report.highlights.slice(0, 4),
+      records: report.salesSummary.slice(0, 8),
+    };
+  }
+
+  const [products, patients, alerts] = await Promise.all([
+    prisma.product.findMany({
+      where: { isActive: true },
+      orderBy: { name: "asc" },
+      take: 120,
+    }),
+    searchPatients(normalizedQuery),
+    buildOperationalAlerts(8),
+  ]);
+
+  const productMatches = products
+    .map((product) => ({
+      ...product,
+      relevance: scoreProductSearch(product, normalizedQuery),
+    }))
+    .filter((product) => product.relevance > 0)
+    .sort((a, b) => b.relevance - a.relevance || a.name.localeCompare(b.name))
+    .slice(0, 8);
+
+  return {
+    topic: "general",
+    title: "Respuesta local del sistema",
+    summary:
+      productMatches.length > 0
+        ? `Encontre ${productMatches.length} coincidencias de producto y ${patients.slice(0, 5).length} de paciente.`
+        : `No hubo coincidencias fuertes. Hay ${alerts.total} alertas operativas activas.`,
+    bullets: [
+      ...productMatches.slice(0, 4).map((item) => `${item.name} (${item.sku})`),
+      ...patients.slice(0, 3).map((item) => `Paciente: ${item.fullName}`),
+      ...alerts.alerts.slice(0, 2).map((item) => item.title),
+    ],
+    records: {
+      products: productMatches,
+      patients: patients.slice(0, 5),
+      alerts: alerts.alerts.slice(0, 5),
+    },
   };
 }
 
@@ -978,26 +2234,24 @@ app.get(
       ? (rawKind as ProductKindCode)
       : null;
 
-    const where = {
-      kind: kindFilter ? kindFilter : { in: inventoryKinds },
-      ...(query
-        ? {
-            OR: [
-              { name: { contains: query } },
-              { commercialName: { contains: query } },
-              { sku: { contains: query } },
-              { category: { contains: query } },
-            ],
-          }
-        : {}),
-    };
-
     const products = await prisma.product.findMany({
-      where,
+      where: {
+        kind: kindFilter ? kindFilter : { in: inventoryKinds },
+      },
       orderBy: [{ isActive: "desc" }, { name: "asc" }],
     });
 
-    res.json(products);
+    const ranked = query
+      ? products
+          .map((product) => ({
+            ...product,
+            relevance: scoreProductSearch(product, query),
+          }))
+          .filter((product) => product.relevance > 0)
+          .sort((a, b) => b.relevance - a.relevance || a.name.localeCompare(b.name))
+      : products;
+
+    res.json(ranked);
   }),
 );
 
@@ -1011,6 +2265,7 @@ app.get(
     const kindFilter = Object.values(ProductKind).includes(rawKind as ProductKindCode)
       ? (rawKind as ProductKindCode)
       : null;
+    const intent = inferSearchIntent(query);
 
     if (query.length < 2) {
       res.status(400).json({ message: "La busqueda requiere minimo 2 caracteres." });
@@ -1019,13 +2274,9 @@ app.get(
 
     const products = await prisma.product.findMany({
       where: {
-        kind: kindFilter ? kindFilter : { in: inventoryKinds },
-        OR: [
-          { name: { contains: query } },
-          { commercialName: { contains: query } },
-          { sku: { contains: query } },
-          { category: { contains: query } },
-        ],
+        kind:
+          kindFilter ??
+          (intent.wantsServices ? ProductKind.MEDICAL_SERVICE : { in: [...inventoryKinds, serviceKind] }),
         isActive: true,
       },
     });
@@ -1035,6 +2286,15 @@ app.get(
         ...product,
         relevance: scoreProductSearch(product, query),
       }))
+      .filter((product) => {
+        if (intent.wantsRestock) {
+          return product.kind !== ProductKind.MEDICAL_SERVICE && product.stock <= product.minStock;
+        }
+        if (intent.wantsOutOfStock) {
+          return product.kind !== ProductKind.MEDICAL_SERVICE && product.stock === 0;
+        }
+        return product.relevance > 0;
+      })
       .sort((a, b) => b.relevance - a.relevance || a.name.localeCompare(b.name));
 
     res.json(ranked);
@@ -1045,23 +2305,10 @@ app.get(
   "/api/pos/items",
   asyncHandler(async (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
-
-    const where = {
-      isActive: true,
-      ...(query
-        ? {
-            OR: [
-              { name: { contains: query } },
-              { commercialName: { contains: query } },
-              { sku: { contains: query } },
-              { category: { contains: query } },
-            ],
-          }
-        : {}),
-    };
+    const intent = inferSearchIntent(query);
 
     const items = await prisma.product.findMany({
-      where,
+      where: { isActive: true },
       orderBy: [{ kind: "asc" }, { name: "asc" }],
     });
 
@@ -1071,6 +2318,15 @@ app.get(
             ...item,
             relevance: scoreProductSearch(item, query),
           }))
+          .filter((item) => {
+            if (intent.wantsServices) {
+              return item.kind === ProductKind.MEDICAL_SERVICE;
+            }
+            if (intent.wantsRestock) {
+              return item.kind !== ProductKind.MEDICAL_SERVICE && item.stock <= item.minStock;
+            }
+            return item.relevance > 0;
+          })
           .sort((a, b) => b.relevance - a.relevance || a.name.localeCompare(b.name))
       : items;
 
@@ -1115,9 +2371,9 @@ app.post(
       const normalizedCommercialName = payload.commercialName?.trim()
         ? payload.commercialName.trim()
         : null;
-      const { sku: _ignoredSku, ...productData } = payload;
+      const { sku: _ignoredSku, lotCode: _ignoredLotCode, ...productData } = payload;
 
-      return tx.product.create({
+      const created = await tx.product.create({
         data: {
           ...productData,
           sku: resolvedSku,
@@ -1129,6 +2385,30 @@ app.post(
           expiresAt: resolvedExpiresAt,
         },
       });
+
+      if (resolvedStock > 0 && payload.kind !== serviceKind) {
+        await increaseInventoryLot(tx, created, {
+          quantity: resolvedStock,
+          lotCode: payload.lotCode,
+          expiresAt: resolvedExpiresAt,
+          cost: payload.cost,
+        });
+      }
+
+      await writeAuditLog(tx, {
+        entityType: "product",
+        entityId: created.id,
+        action: "CREATE",
+        message: `Producto creado: ${created.name}.`,
+        payload: {
+          sku: created.sku,
+          kind: created.kind,
+          stock: created.stock,
+          minStock: created.minStock,
+        },
+      });
+
+      return created;
     });
 
     res.status(201).json(createdProduct);
@@ -1146,6 +2426,7 @@ app.put(
       if (!previousProduct) {
         throw new ApiError(404, "Producto no encontrado.");
       }
+      const { lotCode: _ignoredLotCode, ...payloadForUpdate } = payload;
 
       const nextCost = payload.cost ?? previousProduct.cost;
       const nextPrice = payload.price ?? previousProduct.price;
@@ -1187,7 +2468,7 @@ app.put(
       const updatedProduct = await tx.product.update({
         where: { id: productId },
         data: {
-          ...payload,
+          ...payloadForUpdate,
           sku: typeof payload.sku === "string" ? nextSku : undefined,
           kind: nextKind,
           category:
@@ -1214,6 +2495,22 @@ app.put(
           expiresAt: nextExpiresAt,
         },
       });
+
+      if (typeof payload.price === "number" && payload.price !== previousProduct.price) {
+        const previousPrice = previousProduct.price;
+        const newPrice = payload.price;
+        const changePct = previousPrice > 0 ? (newPrice - previousPrice) / previousPrice : 1;
+
+        await tx.productPriceEvent.create({
+          data: {
+            productId,
+            previousPrice,
+            newPrice,
+            changePct,
+            reason: "Actualizacion manual de precio publico.",
+          },
+        });
+      }
 
       let priceReview: {
         suggestedPrice: number;
@@ -1266,6 +2563,42 @@ app.put(
         });
       }
 
+      if (
+        typeof payload.expiresAt === "string" &&
+        updatedProduct.kind === ProductKind.MEDICATION
+      ) {
+        const earliestLot = await tx.inventoryLot.findFirst({
+          where: {
+            productId,
+            quantity: { gt: 0 },
+          },
+          orderBy: { expiresAt: "asc" },
+        });
+
+        if (earliestLot) {
+          await tx.inventoryLot.update({
+            where: { id: earliestLot.id },
+            data: {
+              expiresAt: nextExpiresAt,
+            },
+          });
+          await syncProductFromLots(tx, productId);
+        }
+      }
+
+      await writeAuditLog(tx, {
+        entityType: "product",
+        entityId: productId,
+        action: "UPDATE",
+        message: `Producto actualizado: ${updatedProduct.name}.`,
+        payload: {
+          cost: updatedProduct.cost,
+          price: updatedProduct.price,
+          minStock: updatedProduct.minStock,
+          isActive: updatedProduct.isActive,
+        },
+      });
+
       return {
         updatedProduct,
         costIncreaseDetected: priceReview !== null,
@@ -1305,16 +2638,57 @@ app.patch(
         throw new ApiError(400, "El ajuste deja el inventario en negativo.");
       }
 
-      const productAfterUpdate = await tx.product.update({
-        where: { id: productId },
-        data: { stock: nextStock },
-      });
+      let touchedLotCodes: string[] = [];
+      if (payload.change > 0) {
+        const lotCode = await increaseInventoryLot(tx, product, {
+          quantity: payload.change,
+          lotCode: payload.lotCode,
+          expiresAt: payload.expiresAt ? normalizeDateInput(payload.expiresAt) : undefined,
+          cost: payload.cost ?? undefined,
+        });
+        touchedLotCodes = lotCode ? [lotCode] : [];
+      } else if (payload.change < 0) {
+        touchedLotCodes = await consumeInventoryLots(tx, product, Math.abs(payload.change));
+      }
+
+      if (typeof payload.cost === "number" && payload.cost !== product.cost) {
+        const changePct = product.cost > 0 ? (payload.cost - product.cost) / product.cost : 1;
+        await tx.product.update({
+          where: { id: productId },
+          data: { cost: payload.cost },
+        });
+        await tx.productCostEvent.create({
+          data: {
+            productId,
+            previousCost: product.cost,
+            newCost: payload.cost,
+            changePct,
+            reason: `Ajuste rapido de stock: ${payload.reason}`,
+          },
+        });
+      }
 
       await tx.inventoryMovement.create({
         data: {
           productId,
           change: payload.change,
           reason: payload.reason,
+          lotCode: touchedLotCodes.join(", ") || payload.lotCode?.trim() || null,
+        },
+      });
+
+      const productAfterUpdate = await syncProductFromLots(tx, productId);
+
+      await writeAuditLog(tx, {
+        entityType: "product",
+        entityId: productId,
+        action: "STOCK_ADJUST",
+        message: `Ajuste de inventario para ${product.name}.`,
+        payload: {
+          change: payload.change,
+          reason: payload.reason,
+          lotCodes: touchedLotCodes,
+          cost: payload.cost,
         },
       });
 
@@ -1328,14 +2702,17 @@ app.patch(
 app.get(
   "/api/inventory/alerts",
   asyncHandler(async (_req, res) => {
-    const products = await prisma.product.findMany({
-      where: {
-        isActive: true,
-        kind: { in: inventoryKinds },
-        unit: { not: "servicio" },
-      },
-      orderBy: { name: "asc" },
-    });
+    const [products, operational] = await Promise.all([
+      prisma.product.findMany({
+        where: {
+          isActive: true,
+          kind: { in: inventoryKinds },
+          unit: { not: "servicio" },
+        },
+        orderBy: { name: "asc" },
+      }),
+      buildOperationalAlerts(20),
+    ]);
 
     const lowStockAlerts = products
       .map((product) => {
@@ -1353,27 +2730,44 @@ app.get(
     now.setHours(0, 0, 0, 0);
     const expiringLimit = new Date(now.getTime() + expirationAlertDays * 24 * 60 * 60 * 1000);
 
-    const expiringAlerts = products
-      .filter((product) => product.kind === ProductKind.MEDICATION && !!product.expiresAt)
-      .map((product) => {
-        const expiryDate = new Date(product.expiresAt as Date);
+    const expiringLots = await prisma.inventoryLot.findMany({
+      where: {
+        quantity: { gt: 0 },
+        expiresAt: { not: null, lte: expiringLimit },
+        product: {
+          kind: ProductKind.MEDICATION,
+          isActive: true,
+        },
+      },
+      include: {
+        product: true,
+      },
+      orderBy: { expiresAt: "asc" },
+      take: 120,
+    });
+
+    const expiringAlerts = expiringLots
+      .map((lot) => {
+        const expiryDate = new Date(lot.expiresAt as Date);
         expiryDate.setHours(0, 0, 0, 0);
         const daysToExpire = Math.ceil(
           (expiryDate.getTime() - now.getTime()) / (24 * 60 * 60 * 1000),
         );
 
         return {
-          id: product.id,
-          sku: product.sku,
-          name: product.name,
-          commercialName: product.commercialName,
-          category: product.category,
-          expiresAt: (product.expiresAt as Date).toISOString(),
+          id: lot.id,
+          productId: lot.productId,
+          sku: lot.product.sku,
+          name: lot.product.name,
+          commercialName: lot.product.commercialName,
+          category: lot.product.category,
+          lotCode: lot.lotCode,
+          quantity: lot.quantity,
+          expiresAt: (lot.expiresAt as Date).toISOString(),
           daysToExpire,
           status: daysToExpire < 0 ? "EXPIRED" : "EXPIRING_SOON",
         };
       })
-      .filter((product) => new Date(product.expiresAt) <= expiringLimit)
       .sort((a, b) => a.daysToExpire - b.daysToExpire);
 
     res.json({
@@ -1382,6 +2776,8 @@ app.get(
       expiringTotal: expiringAlerts.length,
       expiringAlerts,
       expirationThresholdDays: expirationAlertDays,
+      appointmentReminderMinutes,
+      operationalAlerts: operational.alerts,
     });
   }),
 );
@@ -1417,6 +2813,7 @@ app.post(
     const productIds = normalizedItems.map((item) => item.productId);
 
     const createdSale = await prisma.$transaction(async (tx) => {
+      const openSession = await getOpenCashSession(tx);
       const products = await tx.product.findMany({
         where: {
           id: { in: productIds },
@@ -1437,6 +2834,8 @@ app.post(
           subtotal: 0,
           discount: payload.discount,
           total: 0,
+          amountPaid: payload.amountPaid,
+          changeGiven: payload.changeGiven,
         },
       });
 
@@ -1449,29 +2848,22 @@ app.post(
         }
 
         if (product.kind !== serviceKind) {
-          const stockUpdated = await tx.product.updateMany({
-            where: {
-              id: product.id,
-              stock: { gte: item.quantity },
-            },
-            data: {
-              stock: {
-                decrement: item.quantity,
-              },
-            },
-          });
-
-          if (stockUpdated.count === 0) {
-            const stockSnapshot = await tx.product.findUnique({
-              where: { id: product.id },
-              select: { name: true, stock: true },
-            });
-
+          const touchedLots = await consumeInventoryLots(tx, product, item.quantity);
+          if (touchedLots.length === 0 && product.stock < item.quantity) {
             throw new ApiError(
               400,
-              `Stock insuficiente para ${stockSnapshot?.name ?? product.name}. Disponible: ${stockSnapshot?.stock ?? 0}.`,
+              `Stock insuficiente para ${product.name}. Disponible: ${product.stock}.`,
             );
           }
+
+          await tx.inventoryMovement.create({
+            data: {
+              productId: product.id,
+              change: -item.quantity,
+              reason: `Venta #${sale.id}`,
+              lotCode: touchedLots.join(", "),
+            },
+          });
         }
 
         const lineTotal = roundMoney(item.quantity * product.price);
@@ -1486,25 +2878,23 @@ app.post(
             lineTotal,
           },
         });
-
-        if (product.kind !== serviceKind) {
-          await tx.inventoryMovement.create({
-            data: {
-              productId: product.id,
-              change: -item.quantity,
-              reason: `Venta #${sale.id}`,
-            },
-          });
-        }
       }
 
       const total = roundMoney(Math.max(0, subtotal - payload.discount));
+      const amountPaid = payload.amountPaid ?? total;
+      const changeGiven = payload.changeGiven ?? roundMoney(Math.max(0, amountPaid - total));
 
-      return tx.sale.update({
+      if (amountPaid < total) {
+        throw new ApiError(400, "El pago recibido no cubre el total de la venta.");
+      }
+
+      const finalSale = await tx.sale.update({
         where: { id: sale.id },
         data: {
           subtotal: roundMoney(subtotal),
           total,
+          amountPaid,
+          changeGiven,
         },
         include: {
           items: {
@@ -1512,6 +2902,29 @@ app.post(
           },
         },
       });
+
+      if (openSession) {
+        await appendCashMovement(tx, openSession.id, {
+          type: CashMovementType.SALE,
+          amount: total,
+          reason: `Venta #${sale.id}`,
+          saleId: sale.id,
+        });
+      }
+
+      await writeAuditLog(tx, {
+        entityType: "sale",
+        entityId: sale.id,
+        action: "CREATE",
+        message: `Venta #${sale.id} registrada.`,
+        payload: {
+          total,
+          items: normalizedItems,
+          cashSessionId: openSession?.id ?? null,
+        },
+      });
+
+      return finalSale;
     });
 
     res.status(201).json(createdSale);
@@ -1546,6 +2959,10 @@ app.get(
         status && Object.values(AppointmentStatus).includes(status as AppointmentStatusCode)
           ? { status: status as AppointmentStatusCode }
           : undefined,
+      include: {
+        patient: true,
+        consultation: true,
+      },
       orderBy: { appointmentAt: "asc" },
       take: 100,
     });
@@ -1563,13 +2980,36 @@ app.post(
       throw new ApiError(400, "La fecha de cita no es valida.");
     }
 
-    const appointment = await prisma.appointment.create({
-      data: {
-        patientName: payload.patientName,
-        serviceType: payload.serviceType,
+    const appointment = await prisma.$transaction(async (tx) => {
+      const patient = await findOrCreatePatient(tx, {
+        fullName: payload.patientName,
+        phone: payload.patientPhone,
         notes: payload.notes,
-        appointmentAt: appointmentDate,
-      },
+      });
+
+      const created = await tx.appointment.create({
+        data: {
+          patientId: patient.id,
+          patientName: payload.patientName,
+          patientPhone: payload.patientPhone?.trim() || null,
+          serviceType: payload.serviceType,
+          notes: payload.notes,
+          appointmentAt: appointmentDate,
+        },
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "appointment",
+        entityId: created.id,
+        action: "CREATE",
+        message: `Cita registrada para ${created.patientName}.`,
+        payload: {
+          serviceType: created.serviceType,
+          appointmentAt: created.appointmentAt.toISOString(),
+        },
+      });
+
+      return created;
     });
 
     res.status(201).json(appointment);
@@ -1582,12 +3022,405 @@ app.patch(
     const appointmentId = parseId(req.params.id);
     const payload = appointmentStatusSchema.parse(req.body);
 
-    const updatedAppointment = await prisma.appointment.update({
-      where: { id: appointmentId },
-      data: { status: payload.status },
+    const updatedAppointment = await prisma.$transaction(async (tx) => {
+      const updated = await tx.appointment.update({
+        where: { id: appointmentId },
+        data: { status: payload.status },
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "appointment",
+        entityId: appointmentId,
+        action: "STATUS_CHANGE",
+        message: `Estado de cita actualizado a ${payload.status}.`,
+        payload: {
+          status: payload.status,
+        },
+      });
+
+      return updated;
     });
 
     res.json(updatedAppointment);
+  }),
+);
+
+app.get(
+  "/api/patients",
+  asyncHandler(async (req, res) => {
+    const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const patients = query ? await searchPatients(query) : await prisma.patient.findMany({
+      orderBy: { updatedAt: "desc" },
+      take: 120,
+    });
+
+    res.json(patients);
+  }),
+);
+
+app.post(
+  "/api/patients",
+  asyncHandler(async (req, res) => {
+    const payload = patientCreateSchema.parse(req.body);
+    const patient = await prisma.$transaction(async (tx) => {
+      const created = await findOrCreatePatient(tx, {
+        fullName: payload.fullName,
+        phone: payload.phone,
+        notes: payload.notes,
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "patient",
+        entityId: created.id,
+        action: "UPSERT",
+        message: `Paciente registrado: ${created.fullName}.`,
+        payload: {
+          phone: created.phone,
+        },
+      });
+
+      return created;
+    });
+
+    res.status(201).json(patient);
+  }),
+);
+
+app.get(
+  "/api/consultations",
+  asyncHandler(async (req, res) => {
+    const patientId =
+      typeof req.query.patientId === "string" ? parseId(req.query.patientId) : null;
+
+    const consultations = await prisma.consultation.findMany({
+      where: patientId ? { patientId } : undefined,
+      include: {
+        patient: true,
+        appointment: true,
+        serviceProduct: true,
+      },
+      orderBy: { createdAt: "desc" },
+      take: 120,
+    });
+
+    res.json(consultations);
+  }),
+);
+
+app.post(
+  "/api/consultations",
+  asyncHandler(async (req, res) => {
+    const payload = consultationCreateSchema.parse(req.body);
+    const followUpAt = payload.followUpAt ? new Date(payload.followUpAt) : null;
+    if (payload.followUpAt && Number.isNaN(followUpAt?.getTime() ?? Number.NaN)) {
+      throw new ApiError(400, "La fecha de seguimiento no es valida.");
+    }
+
+    const consultation = await prisma.$transaction(async (tx) => {
+      const patient = await tx.patient.findUnique({ where: { id: payload.patientId } });
+      if (!patient) {
+        throw new ApiError(404, "Paciente no encontrado.");
+      }
+
+      if (payload.appointmentId) {
+        const appointment = await tx.appointment.findUnique({
+          where: { id: payload.appointmentId },
+        });
+        if (!appointment) {
+          throw new ApiError(404, "La cita asociada no existe.");
+        }
+      }
+
+      const created = await tx.consultation.create({
+        data: {
+          patientId: payload.patientId,
+          appointmentId: payload.appointmentId,
+          serviceProductId: payload.serviceProductId,
+          serviceType: payload.serviceType,
+          summary: payload.summary,
+          diagnosis: payload.diagnosis,
+          treatment: payload.treatment,
+          observations: payload.observations,
+          followUpAt,
+          followUpStatus:
+            payload.followUpStatus ??
+            (followUpAt ? FollowUpStatus.PENDING : FollowUpStatus.NONE),
+        },
+        include: {
+          patient: true,
+          appointment: true,
+          serviceProduct: true,
+        },
+      });
+
+      await tx.patient.update({
+        where: { id: payload.patientId },
+        data: { lastVisitAt: new Date() },
+      });
+
+      if (payload.appointmentId) {
+        await tx.appointment.update({
+          where: { id: payload.appointmentId },
+          data: { status: AppointmentStatus.COMPLETED },
+        });
+      }
+
+      await writeAuditLog(tx, {
+        entityType: "consultation",
+        entityId: created.id,
+        action: "CREATE",
+        message: `Consulta registrada para ${created.patient.fullName}.`,
+        payload: {
+          serviceType: created.serviceType,
+          followUpAt: created.followUpAt?.toISOString() ?? null,
+        },
+      });
+
+      return created;
+    });
+
+    res.status(201).json(consultation);
+  }),
+);
+
+app.patch(
+  "/api/consultations/:id/follow-up",
+  asyncHandler(async (req, res) => {
+    const consultationId = parseId(req.params.id);
+    const payload = followUpStatusSchema.parse(req.body);
+
+    const consultation = await prisma.$transaction(async (tx) => {
+      const updated = await tx.consultation.update({
+        where: { id: consultationId },
+        data: {
+          followUpStatus: payload.status,
+        },
+        include: {
+          patient: true,
+        },
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "consultation",
+        entityId: consultationId,
+        action: "FOLLOW_UP_STATUS",
+        message: `Seguimiento de ${updated.patient.fullName} actualizado a ${payload.status}.`,
+        payload: {
+          status: payload.status,
+        },
+      });
+
+      return updated;
+    });
+
+    res.json(consultation);
+  }),
+);
+
+app.get(
+  "/api/inventory/lots",
+  asyncHandler(async (req, res) => {
+    const productId =
+      typeof req.query.productId === "string" ? parseId(req.query.productId) : null;
+
+    const lots = await prisma.inventoryLot.findMany({
+      where: productId ? { productId } : undefined,
+      include: {
+        product: {
+          select: {
+            id: true,
+            sku: true,
+            name: true,
+            commercialName: true,
+            kind: true,
+          },
+        },
+      },
+      orderBy: [{ expiresAt: "asc" }, { createdAt: "desc" }],
+      take: 240,
+    });
+
+    res.json(lots);
+  }),
+);
+
+app.get(
+  "/api/cash/current",
+  asyncHandler(async (_req, res) => {
+    res.json(await buildCashOverview());
+  }),
+);
+
+app.post(
+  "/api/cash/open",
+  asyncHandler(async (req, res) => {
+    const payload = cashSessionOpenSchema.parse(req.body ?? {});
+
+    const session = await prisma.$transaction(async (tx) => {
+      const existing = await getOpenCashSession(tx);
+      if (existing) {
+        throw new ApiError(409, "Ya existe una caja abierta.");
+      }
+
+      const created = await tx.cashSession.create({
+        data: {
+          status: CashSessionStatus.OPEN,
+          openingAmount: roundMoney(payload.openingAmount),
+          expectedAmount: roundMoney(payload.openingAmount),
+          notes: payload.notes,
+        },
+      });
+
+      await tx.cashMovement.create({
+        data: {
+          sessionId: created.id,
+          type: CashMovementType.OPENING,
+          amount: roundMoney(payload.openingAmount),
+          reason: payload.notes?.trim() || "Apertura de caja",
+        },
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "cashSession",
+        entityId: created.id,
+        action: "OPEN",
+        message: "Caja abierta.",
+        payload: {
+          openingAmount: created.openingAmount,
+        },
+      });
+
+      return tx.cashSession.findUnique({
+        where: { id: created.id },
+        include: {
+          movements: {
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          },
+        },
+      });
+    });
+
+    res.status(201).json(session);
+  }),
+);
+
+app.post(
+  "/api/cash/movements",
+  asyncHandler(async (req, res) => {
+    const payload = cashMovementCreateSchema.parse(req.body);
+
+    const movement = await prisma.$transaction(async (tx) => {
+      const session = await getOpenCashSession(tx);
+      if (!session) {
+        throw new ApiError(409, "No hay una caja abierta.");
+      }
+
+      const created = await appendCashMovement(tx, session.id, payload);
+      await writeAuditLog(tx, {
+        entityType: "cashSession",
+        entityId: session.id,
+        action: "MOVE",
+        message: `Movimiento ${payload.type} registrado en caja.`,
+        payload: {
+          amount: payload.amount,
+          reason: payload.reason,
+        },
+      });
+
+      return created;
+    });
+
+    res.status(201).json(movement);
+  }),
+);
+
+app.post(
+  "/api/cash/close",
+  asyncHandler(async (req, res) => {
+    const payload = cashSessionCloseSchema.parse(req.body);
+
+    const session = await prisma.$transaction(async (tx) => {
+      const openSession = await getOpenCashSession(tx);
+      if (!openSession) {
+        throw new ApiError(409, "No hay una caja abierta para cerrar.");
+      }
+
+      const difference = roundMoney(payload.countedAmount - openSession.expectedAmount);
+      await tx.cashMovement.create({
+        data: {
+          sessionId: openSession.id,
+          type: CashMovementType.CLOSING,
+          amount: roundMoney(payload.countedAmount),
+          reason: payload.notes?.trim() || "Cierre de caja",
+        },
+      });
+
+      const closed = await tx.cashSession.update({
+        where: { id: openSession.id },
+        data: {
+          status: CashSessionStatus.CLOSED,
+          countedAmount: roundMoney(payload.countedAmount),
+          difference,
+          closedAt: new Date(),
+          notes: payload.notes ?? openSession.notes,
+        },
+        include: {
+          movements: {
+            orderBy: { createdAt: "desc" },
+            take: 30,
+          },
+        },
+      });
+
+      await writeAuditLog(tx, {
+        entityType: "cashSession",
+        entityId: closed.id,
+        action: "CLOSE",
+        message: "Caja cerrada.",
+        payload: {
+          expectedAmount: closed.expectedAmount,
+          countedAmount: closed.countedAmount,
+          difference: closed.difference,
+        },
+      });
+
+      return closed;
+    });
+
+    res.json(session);
+  }),
+);
+
+app.get(
+  "/api/operations/alerts",
+  asyncHandler(async (_req, res) => {
+    res.json(await buildOperationalAlerts());
+  }),
+);
+
+app.get(
+  "/api/audit-log",
+  asyncHandler(async (req, res) => {
+    const parsedTake = Number.parseInt(String(req.query.take ?? "120"), 10);
+    const take = Number.isNaN(parsedTake) ? 120 : Math.min(300, Math.max(1, parsedTake));
+    const logs = await prisma.auditLog.findMany({
+      orderBy: { createdAt: "desc" },
+      take,
+    });
+
+    res.json({
+      count: logs.length,
+      logs,
+    });
+  }),
+);
+
+app.post(
+  "/api/assistant/query",
+  asyncHandler(async (req, res) => {
+    const payload = assistantQuerySchema.parse(req.body ?? {});
+    res.json(await buildAssistantResponse(payload.query));
   }),
 );
 
@@ -1604,6 +3437,9 @@ app.get(
       inventorySnapshot,
       openAppointments,
       nextAppointments,
+      pendingFollowUps,
+      cashOverview,
+      operationsAlerts,
     ] = await Promise.all([
       prisma.sale.aggregate({
         _sum: { total: true },
@@ -1639,6 +3475,9 @@ app.get(
         orderBy: { appointmentAt: "asc" },
         take: 5,
       }),
+      buildPendingFollowUps(5),
+      buildCashOverview(),
+      buildOperationalAlerts(10),
     ]);
 
     const lowStockProducts = inventorySnapshot.filter(
@@ -1654,6 +3493,11 @@ app.get(
       lowStockProducts,
       openAppointments,
       nextAppointments,
+      pendingFollowUpsCount: pendingFollowUps.length,
+      pendingFollowUps,
+      openCashSession: cashOverview.openSession,
+      lastClosedCashSession: cashOverview.lastClosedSession,
+      operationalAlerts: operationsAlerts.alerts,
     });
   }),
 );
@@ -1796,7 +3640,7 @@ app.post(
 app.get(
   "/api/ai/business-insights",
   asyncHandler(async (_req, res) => {
-    const [salesReport, inventoryAlerts] = await Promise.all([
+    const [salesReport, inventoryAlerts, followUps] = await Promise.all([
       buildSalesReport(daysAgo(30), new Date()),
       prisma.product.findMany({
         where: {
@@ -1806,6 +3650,7 @@ app.get(
         },
         select: { id: true, name: true, stock: true, minStock: true },
       }),
+      buildPendingFollowUps(6),
     ]);
 
     const lowStock = inventoryAlerts.filter((item) => item.stock <= item.minStock).length;
@@ -1830,11 +3675,12 @@ app.get(
     const leastByUnits = salesReport.leastSellingProducts[0];
 
     const fallbackInsights = [
-      `Ingresos netos ultimos 30 dias: $${salesReport.totalRevenue.toFixed(2)} con ${salesReport.totalSales} ventas.`,
+      ...salesReport.highlights.slice(0, 3),
       `Descuentos acumulados: $${salesReport.totalDiscount.toFixed(2)} (${salesReport.discountRatePct.toFixed(2)}% del bruto).`,
       `Utilidad estimada: $${salesReport.estimatedGrossProfit.toFixed(2)} con margen estimado ${salesReport.estimatedMarginPct.toFixed(2)}%.`,
       `Producto mas vendido por unidades: ${topByUnits ? `${topByUnits.productName} (${topByUnits.quantity})` : "sin datos"}.`,
       `Producto de menor rotacion: ${leastByUnits ? `${leastByUnits.productName} (${leastByUnits.quantity})` : "sin datos"}.`,
+      `Pacientes con seguimiento pendiente: ${followUps.length}.`,
       `Productos con alerta de inventario: ${lowStock}. Recomendacion: priorizar reposicion y campañas para productos de baja rotacion.`,
     ];
 
@@ -1849,6 +3695,17 @@ app.post(
   "/api/database/export",
   asyncHandler(async (_req, res) => {
     const backup = await createDatabaseBackup("manual");
+    await prisma.auditLog.create({
+      data: {
+        entityType: "database",
+        action: "EXPORT",
+        message: "Respaldo manual generado.",
+        payload: {
+          fileName: backup.fileName,
+          destination: backup.destination,
+        },
+      },
+    });
 
     res.json({
       message: "Exportacion completada.",
