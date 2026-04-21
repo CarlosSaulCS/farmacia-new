@@ -933,8 +933,9 @@ function App() {
 
   const [stockProductId, setStockProductId] = useState("");
   const [stockCost, setStockCost] = useState("");
+  const [stockTarget, setStockTarget] = useState("");
   const [stockChange, setStockChange] = useState("");
-  const [stockReason, setStockReason] = useState("Ajuste rapido");
+  const [stockReason, setStockReason] = useState("Correccion de inventario fisico");
   const [stockLotCode, setStockLotCode] = useState("");
   const [stockLotExpiresAt, setStockLotExpiresAt] = useState("");
   const [adjustingStock, setAdjustingStock] = useState(false);
@@ -1303,6 +1304,11 @@ function App() {
 
     return inventoryLots.filter((lot) => lot.productId === Number(stockProductId));
   }, [inventoryLots, stockProductId]);
+
+  const selectedStockProduct = useMemo(
+    () => products.find((product) => product.id === Number(stockProductId)) ?? null,
+    [products, stockProductId],
+  );
 
   const selectedEditProduct = useMemo(
     () => products.find((product) => product.id === Number(editProductId)) ?? null,
@@ -1678,11 +1684,19 @@ function App() {
     }
 
     const hasCost = stockCost.trim().length > 0;
+    const hasTarget = stockTarget.trim().length > 0;
     const hasChange = stockChange.trim().length > 0;
-    if (!hasCost && !hasChange) {
+    if (!hasCost && !hasTarget && !hasChange) {
       setNotice({
         kind: "error",
-        message: "Ingresa al menos costo o cambio de cantidad para aplicar ajuste rapido.",
+        message: "Ingresa al menos costo, stock fisico real o cambio de cantidad.",
+      });
+      return;
+    }
+    if (hasTarget && hasChange) {
+      setNotice({
+        kind: "error",
+        message: "Usa stock fisico real o cambio por diferencia, no ambos al mismo tiempo.",
       });
       return;
     }
@@ -1693,13 +1707,30 @@ function App() {
       return;
     }
 
+    const targetStock = hasTarget ? parseIntSafe(stockTarget, NaN) : null;
+    if (hasTarget && (targetStock === null || Number.isNaN(targetStock) || targetStock < 0)) {
+      setNotice({ kind: "error", message: "El stock fisico real debe ser un numero entero mayor o igual a 0." });
+      return;
+    }
+
     const change = hasChange ? parseIntSafe(stockChange, NaN) : 0;
     if (hasChange && (Number.isNaN(change) || change === 0)) {
       setNotice({ kind: "error", message: "El cambio de cantidad debe ser distinto de 0." });
       return;
     }
-    if (hasChange && !stockReason.trim()) {
-      setNotice({ kind: "error", message: "Debes indicar un motivo del ajuste de cantidad." });
+    const stockWillChange =
+      hasTarget && targetStock !== null
+        ? targetStock !== selectedProduct.stock
+        : hasChange;
+    if (!hasCost && hasTarget && targetStock === selectedProduct.stock) {
+      setNotice({
+        kind: "info",
+        message: "El stock fisico ya coincide con el inventario registrado.",
+      });
+      return;
+    }
+    if (stockWillChange && !stockReason.trim()) {
+      setNotice({ kind: "error", message: "Debes indicar un motivo del ajuste de stock." });
       return;
     }
 
@@ -1720,11 +1751,11 @@ function App() {
         });
       }
 
-      if (hasChange) {
+      if (stockWillChange) {
         await apiRequest<Product>(`/products/${stockProductId}/stock`, {
           method: "PATCH",
           body: JSON.stringify({
-            change,
+            ...(hasTarget && targetStock !== null ? { targetStock } : { change }),
             reason: stockReason.trim(),
             lotCode: stockLotCode.trim() || undefined,
             expiresAt: stockLotExpiresAt || undefined,
@@ -1733,8 +1764,9 @@ function App() {
       }
 
       setStockCost("");
+      setStockTarget("");
       setStockChange("");
-      setStockReason("Ajuste rapido");
+      setStockReason("Correccion de inventario fisico");
       setStockLotCode("");
       setStockLotExpiresAt("");
       setNotice({
@@ -3283,6 +3315,15 @@ function App() {
                       ))}
                     </select>
                   </div>
+                  {selectedStockProduct && (
+                    <p className="muted-line compact-note stock-current-note">
+                      Stock registrado: <strong>{selectedStockProduct.stock}</strong>
+                      {" | "}
+                      Minimo: <strong>{selectedStockProduct.minStock}</strong>
+                      {" | "}
+                      Producto: <strong>{formatProductLabel(selectedStockProduct.name, selectedStockProduct.commercialName)}</strong>
+                    </p>
+                  )}
                   <div className="field-grid two-col">
                     <div className="field-group">
                       <label htmlFor="stock-cost">Nuevo Costo (opcional)</label>
@@ -3296,27 +3337,51 @@ function App() {
                       />
                     </div>
                     <div className="field-group">
-                      <label htmlFor="stock-change">Cambio Cantidad (+/- opcional)</label>
+                      <label htmlFor="stock-target">Stock fisico real (recomendado)</label>
                       <input
-                        id="stock-change"
+                        id="stock-target"
                         type="number"
+                        min={0}
                         step={1}
-                        value={stockChange}
-                        onChange={(event) => setStockChange(event.target.value)}
+                        value={stockTarget}
+                        onChange={(event) => {
+                          setStockTarget(event.target.value);
+                          if (event.target.value.trim()) {
+                            setStockChange("");
+                          }
+                        }}
+                        placeholder="Ej. 4"
                       />
                     </div>
                   </div>
                   <div className="field-group">
-                    <label htmlFor="stock-reason">Motivo (si cambias cantidad)</label>
+                    <label htmlFor="stock-change">Cambio por diferencia (+/- avanzado)</label>
+                    <input
+                      id="stock-change"
+                      type="number"
+                      step={1}
+                      value={stockChange}
+                      onChange={(event) => {
+                        setStockChange(event.target.value);
+                        if (event.target.value.trim()) {
+                          setStockTarget("");
+                        }
+                      }}
+                      placeholder="Ej. -13 si quieres bajar de 17 a 4"
+                    />
+                  </div>
+                  <div className="field-group">
+                    <label htmlFor="stock-reason">Motivo del ajuste</label>
                     <input
                       id="stock-reason"
                       value={stockReason}
                       onChange={(event) => setStockReason(event.target.value)}
+                      placeholder="Conteo fisico, merma, entrada de compra..."
                     />
                   </div>
                   <div className="field-grid two-col">
                     <div className="field-group">
-                      <label htmlFor="stock-lot-code">Lote (opcional)</label>
+                      <label htmlFor="stock-lot-code">Lote (opcional para entradas)</label>
                       <input
                         id="stock-lot-code"
                         value={stockLotCode}
@@ -3325,7 +3390,7 @@ function App() {
                       />
                     </div>
                     <div className="field-group">
-                      <label htmlFor="stock-lot-expiry">Caducidad del lote</label>
+                      <label htmlFor="stock-lot-expiry">Caducidad del lote (entradas)</label>
                       <input
                         id="stock-lot-expiry"
                         type="date"
@@ -3335,6 +3400,7 @@ function App() {
                     </div>
                   </div>
                   <p className="muted-line compact-note">
+                    Para corregir Amoxicilina de 17 a 4, escribe 4 en stock fisico real.
                     Si el costo supera el precio publico, el sistema alinea el precio automaticamente.
                   </p>
                   <button className="secondary-btn" type="submit" disabled={adjustingStock}>

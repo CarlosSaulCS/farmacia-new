@@ -1138,6 +1138,13 @@
   font-size: 0.76rem;
 }
 
+.stock-current-note {
+  padding: 0.72rem 0.82rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(17, 130, 154, 0.08), rgba(45, 155, 99, 0.08));
+}
+
 .agenda-list {
   max-height: 580px;
   overflow: auto;

@@ -138,11 +138,31 @@ const productUpdateSchema = productBaseSchema
   });
 
 const stockAdjustSchema = z.object({
-  change: z.number().int(),
+  change: z.number().int().optional(),
+  targetStock: z.number().int().nonnegative().optional(),
   reason: z.string().min(3).max(120),
   lotCode: z.string().max(60).optional(),
   expiresAt: z.string().max(40).nullable().optional(),
   cost: z.number().nonnegative().optional(),
+}).superRefine((value, context) => {
+  const hasChange = typeof value.change === "number";
+  const hasTargetStock = typeof value.targetStock === "number";
+
+  if (hasChange === hasTargetStock) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetStock"],
+      message: "Envia stock fisico real o cambio de cantidad, pero no ambos.",
+    });
+  }
+
+  if (hasChange && value.change === 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["change"],
+      message: "El cambio de cantidad debe ser distinto de 0.",
+    });
+  }
 });
 
 const saleCreateSchema = z.object({
@@ -2870,22 +2890,31 @@ app.patch(
         );
       }
 
-      const nextStock = product.stock + payload.change;
+      const adjustmentChange =
+        typeof payload.targetStock === "number"
+          ? payload.targetStock - product.stock
+          : payload.change ?? 0;
+
+      if (adjustmentChange === 0) {
+        throw new ApiError(400, "El stock fisico ya coincide con el inventario registrado.");
+      }
+
+      const nextStock = product.stock + adjustmentChange;
       if (nextStock < 0) {
         throw new ApiError(400, "El ajuste deja el inventario en negativo.");
       }
 
       let touchedLotCodes: string[] = [];
-      if (payload.change > 0) {
+      if (adjustmentChange > 0) {
         const lotCode = await increaseInventoryLot(tx, product, {
-          quantity: payload.change,
+          quantity: adjustmentChange,
           lotCode: payload.lotCode,
           expiresAt: payload.expiresAt ? normalizeDateInput(payload.expiresAt) : undefined,
           cost: payload.cost ?? undefined,
         });
         touchedLotCodes = lotCode ? [lotCode] : [];
-      } else if (payload.change < 0) {
-        touchedLotCodes = await consumeInventoryLots(tx, product, Math.abs(payload.change));
+      } else if (adjustmentChange < 0) {
+        touchedLotCodes = await consumeInventoryLots(tx, product, Math.abs(adjustmentChange));
       }
 
       if (typeof payload.cost === "number" && payload.cost !== product.cost) {
@@ -2908,7 +2937,7 @@ app.patch(
       await tx.inventoryMovement.create({
         data: {
           productId,
-          change: payload.change,
+          change: adjustmentChange,
           reason: payload.reason,
           lotCode: touchedLotCodes.join(", ") || payload.lotCode?.trim() || null,
         },
@@ -2922,7 +2951,9 @@ app.patch(
         action: "STOCK_ADJUST",
         message: `Ajuste de inventario para ${product.name}.`,
         payload: {
-          change: payload.change,
+          previousStock: product.stock,
+          targetStock: typeof payload.targetStock === "number" ? payload.targetStock : nextStock,
+          change: adjustmentChange,
           reason: payload.reason,
           lotCodes: touchedLotCodes,
           cost: payload.cost,
