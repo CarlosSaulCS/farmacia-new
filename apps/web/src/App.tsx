@@ -409,6 +409,23 @@ function formatProductLabel(name: string, commercialName?: string | null): strin
   return normalizedCommercialName ? `${name} (${normalizedCommercialName})` : name;
 }
 
+function reorderPriorityLabel(priority: ReorderPriority): string {
+  if (priority === "CRITICAL") {
+    return "Critica";
+  }
+  if (priority === "HIGH") {
+    return "Alta";
+  }
+  return "Media";
+}
+
+function normalizeReorderReportParams(days: string, coverage: string) {
+  return {
+    daysValue: Math.max(1, Math.min(120, parseIntSafe(days, 30))),
+    coverageValue: Math.max(1, Math.min(60, parseIntSafe(coverage, 14))),
+  };
+}
+
 async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
   const [{ jsPDF }, { default: autoTable }] = await Promise.all([
     import("jspdf"),
@@ -424,62 +441,114 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
   const generatedAtText = datetimeFormatter.format(new Date(report.generatedAt));
   const rangeFromText = report.range.from.slice(0, 10);
   const rangeToText = report.range.to.slice(0, 10);
+  const medicationCount = report.items.filter((item) => item.kind === "MEDICATION").length;
+  const supplyCount = report.items.filter((item) => item.kind === "MEDICAL_SUPPLY").length;
+  const criticalCount = report.items.filter((item) => item.priority === "CRITICAL").length;
 
+  doc.setFillColor(248, 252, 252);
+  doc.rect(0, 0, doc.internal.pageSize.getWidth(), 124, "F");
+  doc.setTextColor(9, 47, 70);
   doc.setFontSize(16);
-  doc.text("Reporte De Surtido (Medicamento Y Material Quirurgico)", 40, 40);
+  doc.text("Informe de surtido actualizado", 40, 40);
   doc.setFontSize(10);
-  doc.text(`Generado: ${generatedAtText}`, 40, 58);
-  doc.text(`Rango: ${rangeFromText} al ${rangeToText}`, 40, 74);
+  doc.text("Medicamentos y material que requieren reposicion con base en inventario local.", 40, 58);
+  doc.text(`Generado: ${generatedAtText} | Datos recalculados al momento de exportar`, 40, 76);
+  doc.text(`Rango analizado: ${rangeFromText} al ${rangeToText}`, 40, 92);
   doc.text(
-    `Dias analizados: ${report.periodDays} | Cobertura deseada: ${report.coverageDays}`,
+    `Dias analizados: ${report.periodDays} | Cobertura deseada: ${report.coverageDays} dias`,
     40,
-    90,
+    108,
   );
-  doc.text(
-    `Productos a surtir: ${report.totalItems} | Unidades sugeridas: ${report.totalUnitsSuggested}`,
-    40,
-    106,
-  );
+
+  const summaryCards = [
+    ["Productos", report.totalItems],
+    ["Unidades", report.totalUnitsSuggested],
+    ["Medicamentos", medicationCount],
+    ["Material", supplyCount],
+    ["Criticos", criticalCount],
+  ];
+  summaryCards.forEach(([label, value], index) => {
+    const x = 420 + index * 76;
+    doc.setDrawColor(207, 224, 229);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(x, 34, 66, 50, 10, 10, "FD");
+    doc.setFontSize(8);
+    doc.setTextColor(91, 111, 127);
+    doc.text(String(label), x + 8, 52);
+    doc.setFontSize(14);
+    doc.setTextColor(9, 47, 70);
+    doc.text(String(value), x + 8, 72);
+  });
 
   const bodyRows =
     report.items.length > 0
       ? report.items.map((item, index) => [
           String(index + 1),
-          String(item.productId),
           item.sku,
           formatProductLabel(item.name, item.commercialName),
+          item.commercialName ?? "-",
           item.category ?? "-",
+          productKindLabel(item.kind),
           String(item.stock),
           String(item.minStock),
           String(item.targetStock),
           String(item.suggestedOrder),
+          String(item.soldInPeriod),
           item.dailyVelocity.toFixed(2),
-          item.priority,
+          reorderPriorityLabel(item.priority),
         ])
-      : [["-", "-", "-", "Sin productos para surtir", "-", "-", "-", "-", "-", "-", "-"]];
+      : [["-", "-", "Sin productos para surtir", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]];
 
   autoTable(doc, {
-    startY: 122,
-    head: [["#", "ID", "SKU", "Producto", "Categoria", "Stock", "Min", "Objetivo", "Sugerido", "Vel/Dia", "Prioridad"]],
+    startY: 138,
+    head: [[
+      "#",
+      "SKU",
+      "Producto",
+      "Comercial",
+      "Categoria",
+      "Tipo",
+      "Stock",
+      "Min",
+      "Objetivo",
+      "Surtir",
+      "Vend.",
+      "Vel/Dia",
+      "Prioridad",
+    ]],
     body: bodyRows,
-    theme: "grid",
-    styles: { fontSize: 8, cellPadding: 4 },
-    headStyles: { fillColor: [11, 111, 144] },
+    theme: "striped",
+    styles: {
+      fontSize: 7.5,
+      cellPadding: 4,
+      overflow: "linebreak",
+      textColor: [9, 47, 70],
+      lineColor: [220, 232, 236],
+    },
+    headStyles: {
+      fillColor: [10, 116, 142],
+      textColor: [255, 255, 255],
+      fontStyle: "bold",
+    },
+    alternateRowStyles: { fillColor: [248, 252, 252] },
     columnStyles: {
-      0: { cellWidth: 28 },
-      1: { cellWidth: 34 },
-      2: { cellWidth: 92 },
-      3: { cellWidth: 170 },
-      4: { cellWidth: 86 },
-      5: { cellWidth: 40 },
-      6: { cellWidth: 34 },
-      7: { cellWidth: 52 },
-      8: { cellWidth: 54 },
-      9: { cellWidth: 50 },
-      10: { cellWidth: 56 },
+      0: { cellWidth: 22 },
+      1: { cellWidth: 64 },
+      2: { cellWidth: 145 },
+      3: { cellWidth: 80 },
+      4: { cellWidth: 72 },
+      5: { cellWidth: 58 },
+      6: { cellWidth: 34, halign: "right" },
+      7: { cellWidth: 30, halign: "right" },
+      8: { cellWidth: 38, halign: "right" },
+      9: { cellWidth: 38, halign: "right", fontStyle: "bold" },
+      10: { cellWidth: 36, halign: "right" },
+      11: { cellWidth: 38, halign: "right" },
+      12: { cellWidth: 52 },
     },
     didDrawPage: ({ pageNumber }) => {
       doc.setFontSize(9);
+      doc.setTextColor(91, 111, 127);
       doc.text(
         `Pagina ${pageNumber}`,
         doc.internal.pageSize.getWidth() - 90,
@@ -487,6 +556,20 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
       );
     },
   });
+
+  const tableFinalY =
+    (doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? 138;
+  const highlightsStartY = Math.min(tableFinalY + 24, doc.internal.pageSize.getHeight() - 84);
+  if (report.highlights.length > 0 && highlightsStartY < doc.internal.pageSize.getHeight() - 44) {
+    doc.setFontSize(10);
+    doc.setTextColor(9, 47, 70);
+    doc.text("Resumen operativo", 40, highlightsStartY);
+    doc.setFontSize(8.5);
+    doc.setTextColor(91, 111, 127);
+    report.highlights.slice(0, 4).forEach((item, index) => {
+      doc.text(`- ${item}`, 40, highlightsStartY + 16 + index * 13);
+    });
+  }
 
   const fileDate = new Date().toISOString().slice(0, 10);
   doc.save(`reporte-surtido-${fileDate}.pdf`);
@@ -2323,8 +2406,10 @@ function App() {
       return null;
     }
 
-    const daysValue = Math.max(1, Math.min(120, parseIntSafe(reportDays, 30)));
-    const coverageValue = Math.max(1, Math.min(60, parseIntSafe(coverageDays, 14)));
+    const { daysValue, coverageValue } = normalizeReorderReportParams(
+      reportDays,
+      coverageDays,
+    );
 
     setLoadingReports(true);
     try {
@@ -2366,18 +2451,41 @@ function App() {
     }
   }, [coverageDays, reportDays, reportRange.from, reportRange.to]);
 
+  const loadFreshReorderReport = useCallback(async (): Promise<ReorderReport | null> => {
+    const { daysValue, coverageValue } = normalizeReorderReportParams(
+      reportDays,
+      coverageDays,
+    );
+
+    try {
+      const reorderReportData = await apiRequest<ReorderReport>(
+        `/reports/reorder?days=${daysValue}&coverageDays=${coverageValue}`,
+      );
+
+      setReorderReport(reorderReportData);
+      setReportDays(String(daysValue));
+      setCoverageDays(String(coverageValue));
+      setLastReportsLoadedAt(new Date());
+
+      return reorderReportData;
+    } catch (error) {
+      showError(error, "No fue posible cargar el reporte actualizado de surtido.");
+      return null;
+    }
+  }, [coverageDays, reportDays]);
+
   async function generateRestockReport() {
     setGeneratingRestockPdf(true);
     try {
-      const reportsData = await loadReports();
-      if (!reportsData) {
+      const reorderReportData = await loadFreshReorderReport();
+      if (!reorderReportData) {
         return;
       }
 
-      await exportRestockReportPdf(reportsData.reorderReportData);
+      await exportRestockReportPdf(reorderReportData);
       setNotice({
         kind: "success",
-        message: "Reporte de surtido en PDF generado.",
+        message: "PDF de surtido generado con datos actualizados.",
       });
 
       const reorderSection = document.getElementById("reorder-report-section");
@@ -5080,10 +5188,12 @@ function App() {
                       <thead>
                         <tr>
                           <th>Producto</th>
+                          <th>Categoria</th>
+                          <th>Tipo</th>
                           <th>Stock</th>
                           <th>Objetivo</th>
                           <th>Sugerido</th>
-                          <th>Velocidad Dia</th>
+                          <th>Vendido</th>
                           <th>Puntaje</th>
                           <th>Prioridad</th>
                         </tr>
@@ -5095,22 +5205,24 @@ function App() {
                               {formatProductLabel(item.name, item.commercialName)}
                               <small>{item.sku}</small>
                             </td>
+                            <td>{item.category ?? "-"}</td>
+                            <td>{productKindLabel(item.kind)}</td>
                             <td>{item.stock}</td>
                             <td>{item.targetStock}</td>
                             <td>{item.suggestedOrder}</td>
-                            <td>{item.dailyVelocity.toFixed(2)}</td>
+                            <td>{item.soldInPeriod}</td>
                             <td>{item.criticalityScore.toFixed(1)}</td>
                             <td>
                               <span className={`status-chip ${item.priority.toLowerCase()}`}>
-                                {item.priority}
+                                {reorderPriorityLabel(item.priority)}
                               </span>
                             </td>
                           </tr>
                         ))}
                         {reorderReport.items.length === 0 && (
                           <tr>
-                            <td colSpan={7} className="empty-cell">
-                              No hay faltantes de medicamento en este momento.
+                            <td colSpan={9} className="empty-cell">
+                              No hay medicamentos ni material para surtir en este momento.
                             </td>
                           </tr>
                         )}
