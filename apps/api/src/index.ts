@@ -2777,6 +2777,80 @@ app.put(
   }),
 );
 
+app.delete(
+  "/api/products/:id",
+  asyncHandler(async (req, res) => {
+    const productId = parseId(req.params.id);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const product = await tx.product.findUnique({ where: { id: productId } });
+      if (!product) {
+        throw new ApiError(404, "Producto no encontrado.");
+      }
+
+      const [saleItemCount, consultationCount] = await Promise.all([
+        tx.saleItem.count({ where: { productId } }),
+        tx.consultation.count({ where: { serviceProductId: productId } }),
+      ]);
+
+      if (saleItemCount > 0 || consultationCount > 0) {
+        const archived = await tx.product.update({
+          where: { id: productId },
+          data: { isActive: false },
+        });
+
+        await writeAuditLog(tx, {
+          entityType: "product",
+          entityId: productId,
+          action: "ARCHIVE",
+          message: `Producto archivado: ${archived.name}.`,
+          payload: {
+            sku: archived.sku,
+            saleItemCount,
+            consultationCount,
+          },
+        });
+
+        return {
+          mode: "archived" as const,
+          product: archived,
+        };
+      }
+
+      await tx.inventoryLot.deleteMany({ where: { productId } });
+      await tx.inventoryMovement.deleteMany({ where: { productId } });
+      await tx.productCostEvent.deleteMany({ where: { productId } });
+      await tx.productPriceEvent.deleteMany({ where: { productId } });
+      await tx.product.delete({ where: { id: productId } });
+
+      await writeAuditLog(tx, {
+        entityType: "product",
+        entityId: productId,
+        action: "DELETE",
+        message: `Producto eliminado: ${product.name}.`,
+        payload: {
+          sku: product.sku,
+          kind: product.kind,
+        },
+      });
+
+      return {
+        mode: "deleted" as const,
+        product,
+      };
+    });
+
+    res.json({
+      mode: result.mode,
+      product: result.product,
+      message:
+        result.mode === "deleted"
+          ? "Producto eliminado del catalogo."
+          : "Producto archivado porque ya tiene historial operativo.",
+    });
+  }),
+);
+
 app.patch(
   "/api/products/:id/stock",
   asyncHandler(async (req, res) => {

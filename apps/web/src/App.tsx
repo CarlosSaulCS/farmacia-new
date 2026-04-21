@@ -940,6 +940,7 @@ function App() {
   const [adjustingStock, setAdjustingStock] = useState(false);
 
   const [editProductId, setEditProductId] = useState("");
+  const [editProductName, setEditProductName] = useState("");
   const [editCommercialName, setEditCommercialName] = useState("");
   const [editCost, setEditCost] = useState("");
   const [editPrice, setEditPrice] = useState("");
@@ -947,6 +948,7 @@ function App() {
   const [editExpiresAt, setEditExpiresAt] = useState("");
   const [editActive, setEditActive] = useState(true);
   const [savingProductChanges, setSavingProductChanges] = useState(false);
+  const [deletingProduct, setDeletingProduct] = useState(false);
   const [runningMonthlyCutoff, setRunningMonthlyCutoff] = useState(false);
 
   const [appointmentStatusFilter, setAppointmentStatusFilter] = useState<
@@ -1120,6 +1122,7 @@ function App() {
       return;
     }
 
+    setEditProductName(selectedProduct.name);
     setEditCommercialName(selectedProduct.commercialName ?? "");
     setEditCost(String(selectedProduct.cost));
     setEditPrice(String(selectedProduct.price));
@@ -1818,6 +1821,15 @@ function App() {
       return;
     }
 
+    const productName = editProductName.trim();
+    if (productName.length < 2) {
+      setNotice({
+        kind: "error",
+        message: "El nombre generico o compuesto activo debe tener al menos 2 caracteres.",
+      });
+      return;
+    }
+
     const cost = parseFloatSafe(editCost, NaN);
     const price = parseFloatSafe(editPrice, NaN);
     const minStock = parseIntSafe(editMinStock, NaN);
@@ -1860,6 +1872,7 @@ function App() {
       >(`/products/${editProductId}`, {
         method: "PUT",
         body: JSON.stringify({
+          name: productName,
           commercialName: editCommercialName.trim() || null,
           cost,
           price,
@@ -1890,6 +1903,45 @@ function App() {
       showError(error, "No fue posible actualizar el producto.");
     } finally {
       setSavingProductChanges(false);
+    }
+  }
+
+  async function deleteSelectedProduct() {
+    if (!editProductId) {
+      setNotice({ kind: "error", message: "Selecciona un producto para eliminar." });
+      return;
+    }
+
+    const selectedProduct = products.find((product) => product.id === Number(editProductId));
+    if (!selectedProduct) {
+      setNotice({ kind: "error", message: "Producto seleccionado no disponible." });
+      return;
+    }
+
+    const confirmation = window.confirm(
+      `Eliminar ${formatProductLabel(selectedProduct.name, selectedProduct.commercialName)}?\n\n` +
+        "Si ya tiene ventas historicas, se archivara para conservar reportes y tickets.",
+    );
+    if (!confirmation) {
+      return;
+    }
+
+    setDeletingProduct(true);
+    try {
+      const result = await apiRequest<{ mode: "deleted" | "archived"; message: string }>(
+        `/products/${editProductId}`,
+        {
+          method: "DELETE",
+        },
+      );
+
+      setNotice({ kind: "success", message: result.message });
+      setEditProductId("");
+      await refreshCoreData();
+    } catch (error) {
+      showError(error, "No fue posible eliminar el producto.");
+    } finally {
+      setDeletingProduct(false);
     }
   }
 
@@ -3379,6 +3431,16 @@ function App() {
                   )}
 
                   <div className="field-group">
+                    <label htmlFor="edit-product-name">Nombre Generico / Composicion</label>
+                    <input
+                      id="edit-product-name"
+                      value={editProductName}
+                      onChange={(event) => setEditProductName(event.target.value)}
+                      placeholder="Paracetamol 500 mg, Amoxicilina 500 mg..."
+                    />
+                  </div>
+
+                  <div className="field-group">
                     <label htmlFor="edit-commercial-name">Nombre Comercial (opcional)</label>
                     <input
                       id="edit-commercial-name"
@@ -3446,9 +3508,23 @@ function App() {
                     <label htmlFor="edit-active">Producto activo para venta</label>
                   </div>
 
-                  <button className="secondary-btn" type="submit" disabled={savingProductChanges}>
-                    {savingProductChanges ? "Guardando..." : "Guardar Cambios"}
-                  </button>
+                  <div className="button-row split-actions">
+                    <button
+                      className="danger-btn"
+                      type="button"
+                      onClick={() => void deleteSelectedProduct()}
+                      disabled={deletingProduct || savingProductChanges || !selectedEditProduct}
+                    >
+                      {deletingProduct ? "Eliminando..." : "Eliminar Producto"}
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      type="submit"
+                      disabled={savingProductChanges || deletingProduct}
+                    >
+                      {savingProductChanges ? "Guardando..." : "Guardar Cambios"}
+                    </button>
+                  </div>
                 </form>
               </details>
 

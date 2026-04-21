@@ -223,6 +223,7 @@
 .refresh-button,
 .primary-btn,
 .secondary-btn,
+.danger-btn,
 .ghost-btn,
 .catalog-meta button,
 .inline-toolbar button,
@@ -240,6 +241,7 @@
 .refresh-button,
 .primary-btn,
 .secondary-btn,
+.danger-btn,
 .catalog-meta button,
 .inline-toolbar button,
 .range-box button {
@@ -265,6 +267,12 @@
   color: var(--text);
 }
 
+.danger-btn {
+  background: var(--danger-soft);
+  border-color: rgba(212, 93, 93, 0.28);
+  color: #ad3f3f;
+}
+
 .ghost-btn {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -277,6 +285,7 @@
 .refresh-button:hover,
 .primary-btn:hover,
 .secondary-btn:hover,
+.danger-btn:hover,
 .ghost-btn:hover,
 .catalog-meta button:hover,
 .inline-toolbar button:hover,
@@ -287,6 +296,7 @@
 .refresh-button:disabled,
 .primary-btn:disabled,
 .secondary-btn:disabled,
+.danger-btn:disabled,
 .ghost-btn:disabled,
 .catalog-meta button:disabled,
 .inline-toolbar button:disabled,
@@ -1153,6 +1163,11 @@
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 6px;
+}
+
+.button-row.split-actions {
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .button-row .ghost-btn {
