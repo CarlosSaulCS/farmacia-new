@@ -2090,8 +2090,8 @@ async function buildReorderReport(days: number, coverageDays: number) {
       );
       const suggestedOrder = Math.max(0, targetStock - product.stock);
 
-      const needsRestock = product.stock <= product.minStock || suggestedOrder > 0;
-      if (!needsRestock) {
+      const reachedMinimumStock = product.stock <= product.minStock;
+      if (!reachedMinimumStock) {
         return null;
       }
 
@@ -2154,7 +2154,7 @@ async function buildReorderReport(days: number, coverageDays: number) {
     highlights: [
       items[0]
         ? `Prioridad principal: ${items[0].name} con ${items[0].suggestedOrder} unidades sugeridas.`
-        : "No hay productos urgentes por surtir.",
+        : "No hay productos en stock minimo para surtir.",
       items.find((item) => item.kind === ProductKind.MEDICAL_SUPPLY)
         ? `Material quirurgico prioritario: ${items.find((item) => item.kind === ProductKind.MEDICAL_SUPPLY)?.name}.`
         : "Sin material quirurgico critico por surtir.",

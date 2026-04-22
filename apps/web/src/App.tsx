@@ -451,7 +451,7 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
   doc.setFontSize(16);
   doc.text("Informe de surtido actualizado", 40, 40);
   doc.setFontSize(10);
-  doc.text("Medicamentos y material que requieren reposicion con base en inventario local.", 40, 58);
+  doc.text("Medicamentos y material en stock minimo o por debajo, recalculados desde inventario local.", 40, 58);
   doc.text(`Generado: ${generatedAtText} | Datos recalculados al momento de exportar`, 40, 76);
   doc.text(`Rango analizado: ${rangeFromText} al ${rangeToText}`, 40, 92);
   doc.text(
@@ -5173,14 +5173,14 @@ function App() {
             <article className="surface" id="reorder-report-section">
               <div className="surface-head compact">
                 <div>
-                  <h3>Productos necesarios</h3>
+                  <h3>Stock minimo para surtir</h3>
                 </div>
               </div>
               {loadingReports && <p className="muted-line">Calculando necesidad de reposicion...</p>}
               {!loadingReports && reorderReport && (
                 <>
                   <p className="muted-line">
-                    {reorderReport.totalItems} productos necesitan reposicion. Unidades sugeridas:
+                    {reorderReport.totalItems} productos estan en stock minimo o por debajo. Unidades sugeridas:
                     <strong> {reorderReport.totalUnitsSuggested}</strong>
                   </p>
                   <div className="data-table-wrap tall">
@@ -5222,7 +5222,7 @@ function App() {
                         {reorderReport.items.length === 0 && (
                           <tr>
                             <td colSpan={9} className="empty-cell">
-                              No hay medicamentos ni material para surtir en este momento.
+                              No hay medicamentos ni material en stock minimo en este momento.
                             </td>
                           </tr>
                         )}
