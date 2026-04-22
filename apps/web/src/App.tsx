@@ -4713,7 +4713,8 @@ function App() {
           </div>
 
           <div className="appointments-grid">
-            <article className="surface appointment-booking-card">
+            <div className="appointment-column appointment-schedule-column">
+              <article className="surface appointment-booking-card">
               <h3>Nueva Cita</h3>
               <form className="field-grid" onSubmit={createAppointment}>
                 <div className="field-grid two-col">
@@ -4882,7 +4883,10 @@ function App() {
               </div>
             </article>
 
-            <article className="surface appointment-patients-card">
+            </div>
+
+            <div className="appointment-column appointment-care-column">
+              <article className="surface appointment-patients-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Pacientes y seguimiento</h3>
@@ -5138,7 +5142,8 @@ function App() {
                   {savingConsultation ? "Guardando..." : "Registrar Consulta"}
                 </button>
               </form>
-            </article>
+              </article>
+            </div>
           </div>
         </section>
       )}
@@ -5269,7 +5274,8 @@ function App() {
           </article>
 
           <div className="reports-grid">
-            <article className="surface report-sales-card">
+            <div className="report-column report-main-column">
+              <article className="surface report-sales-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Reporte de ventas</h3>
@@ -5603,9 +5609,11 @@ function App() {
                   </details>
                 </>
               )}
-            </article>
+              </article>
+            </div>
 
-            <article className="surface report-reorder-card" id="reorder-report-section">
+            <div className="report-column report-side-column">
+              <article className="surface report-reorder-card" id="reorder-report-section">
               <div className="surface-head compact">
                 <div>
                   <h3>Stock minimo para surtir</h3>
@@ -5795,7 +5803,8 @@ function App() {
                   </div>
                 </div>
               </details>
-            </article>
+              </article>
+            </div>
           </div>
         </section>
       )}

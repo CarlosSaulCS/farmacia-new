@@ -872,7 +872,21 @@
 }
 
 .appointments-grid {
+  grid-template-columns: minmax(360px, 0.92fr) minmax(460px, 1.08fr);
   align-items: start;
+}
+
+.appointment-column,
+.report-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--grid-gap);
+  min-width: 0;
+}
+
+.appointment-column > .surface,
+.report-column > .surface {
+  width: 100%;
 }
 
 .appointment-booking-card {
@@ -922,7 +936,7 @@
 
 .appointment-agenda-card .agenda-list,
 .appointment-patients-card .agenda-list {
-  max-height: 340px;
+  max-height: none;
 }
 
 .appointment-consult-card .field-grid {
@@ -931,6 +945,10 @@
 
 .report-sales-card {
   grid-column: span 7;
+}
+
+.reports-grid {
+  grid-template-columns: minmax(600px, 1.34fr) minmax(430px, 0.86fr);
 }
 
 .report-reorder-card {
@@ -946,17 +964,18 @@
 }
 
 .report-analysis-card .insight-list {
-  max-height: 520px;
-  overflow: auto;
-  padding-right: 2px;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .report-log-card .compact-details[open] .details-content {
   padding-top: 10px;
 }
 
-.alerts-grid {
-  grid-auto-flow: dense;
+.reports-mini-grid.alerts-grid {
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-flow: row;
 }
 
 .alert-engine-card,
@@ -976,7 +995,131 @@
 .reports-mini-grid.alerts-grid > .alert-engine-card,
 .reports-mini-grid.alerts-grid > .alert-stock-card,
 .reports-mini-grid.alerts-grid > .alert-expiry-card {
-  grid-column: span 4;
+  grid-column: 1 / -1;
+}
+
+.alerts-grid .data-table-wrap.tall,
+.report-reorder-card .data-table-wrap.tall {
+  max-height: none;
+}
+
+.alerts-grid .data-table {
+  min-width: 0;
+  table-layout: auto;
+}
+
+.alerts-grid .data-table th,
+.alerts-grid .data-table td {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.report-reorder-card .data-table-wrap {
+  overflow: visible;
+}
+
+.report-reorder-card .data-table {
+  min-width: 0;
+}
+
+.report-reorder-card .data-table thead {
+  display: none;
+}
+
+.report-reorder-card .data-table tbody {
+  display: grid;
+  gap: 8px;
+}
+
+.report-reorder-card .data-table tr {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, #ffffff, #f9fbfd);
+}
+
+.report-reorder-card .data-table td {
+  border: 0;
+  padding: 0;
+  color: var(--text);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.report-reorder-card .data-table td::before {
+  display: block;
+  margin-bottom: 2px;
+  color: #6a8296;
+  content: "";
+  font-size: 0.59rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.report-reorder-card .data-table td:nth-child(1) {
+  grid-column: 1 / -1;
+  font-size: 0.92rem;
+  font-weight: 900;
+}
+
+.report-reorder-card .data-table td:nth-child(1)::before {
+  content: "Producto";
+}
+
+.report-reorder-card .data-table td:nth-child(2)::before {
+  content: "Categoria";
+}
+
+.report-reorder-card .data-table td:nth-child(3)::before {
+  content: "Tipo";
+}
+
+.report-reorder-card .data-table td:nth-child(4)::before {
+  content: "Stock";
+}
+
+.report-reorder-card .data-table td:nth-child(5)::before {
+  content: "Objetivo";
+}
+
+.report-reorder-card .data-table td:nth-child(6)::before {
+  content: "Sugerido";
+}
+
+.report-reorder-card .data-table td:nth-child(7)::before {
+  content: "Base min.";
+}
+
+.report-reorder-card .data-table td:nth-child(8)::before {
+  content: "Extra ventas";
+}
+
+.report-reorder-card .data-table td:nth-child(9)::before {
+  content: "Vendido";
+}
+
+.report-reorder-card .data-table td:nth-child(10)::before {
+  content: "Rotacion";
+}
+
+.report-reorder-card .data-table td:nth-child(11)::before {
+  content: "Puntaje";
+}
+
+.report-reorder-card .data-table td:nth-child(12)::before {
+  content: "Prioridad";
+}
+
+.report-reorder-card .data-table .empty-cell {
+  grid-column: 1 / -1;
+}
+
+.report-reorder-card .data-table .empty-cell::before {
+  display: none;
 }
 
 .spotlight-list li {
