@@ -8,6 +8,13 @@ export type PriceAdjustmentSuggestion = {
   confidence: number;
   currentCost?: number;
   currentPrice?: number;
+  historicalAverageCost?: number | null;
+  historicalAveragePrice?: number | null;
+  historicalAverageSalePrice?: number | null;
+  costTrendPct?: number | null;
+  priceTrendPct?: number | null;
+  saleQuantity90Days?: number;
+  historyBasis?: "product" | "similar" | "current";
   marginPct?: number;
   trigger?: "manual" | "monthly-cutoff" | "cost-increase";
   source: "aion" | "local";

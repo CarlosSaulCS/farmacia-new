@@ -269,6 +269,13 @@ type PriceSuggestion = {
   confidence: number;
   currentCost?: number;
   currentPrice?: number;
+  historicalAverageCost?: number | null;
+  historicalAveragePrice?: number | null;
+  historicalAverageSalePrice?: number | null;
+  costTrendPct?: number | null;
+  priceTrendPct?: number | null;
+  saleQuantity90Days?: number;
+  historyBasis?: "product" | "similar" | "current";
   marginPct?: number;
   trigger?: "manual" | "monthly-cutoff" | "cost-increase";
   source: "aion" | "local";
@@ -1026,6 +1033,27 @@ function suggestPublicPriceFromCost(costValue: string, kind: Product["kind"]): s
   return formatSuggestedPrice(cost / Math.max(0.1, 1 - targetMargin));
 }
 
+function formatInventoryPriceSuggestion(suggestion: PriceSuggestion): string {
+  const details = [
+    suggestion.historicalAverageSalePrice
+      ? `venta promedio ${moneyFormatter.format(suggestion.historicalAverageSalePrice)}`
+      : null,
+    suggestion.historicalAverageCost
+      ? `costo promedio ${moneyFormatter.format(suggestion.historicalAverageCost)}`
+      : null,
+    typeof suggestion.costTrendPct === "number"
+      ? `tendencia costo ${suggestion.costTrendPct >= 0 ? "+" : ""}${suggestion.costTrendPct}%`
+      : null,
+    suggestion.saleQuantity90Days
+      ? `${suggestion.saleQuantity90Days} unidades vendidas en 90 dias`
+      : null,
+  ].filter(Boolean);
+
+  return details.length > 0
+    ? `Historico usado: ${details.join("; ")}.`
+    : "Sugerencia calculada con margen objetivo e inventario actual.";
+}
+
 function roundToPosAmount(value: number): number {
   return Math.floor(Math.max(0, value));
 }
@@ -1128,6 +1156,9 @@ function App() {
   });
   const [newProductSkuManuallyEdited, setNewProductSkuManuallyEdited] = useState(false);
   const [newProductPriceManuallyEdited, setNewProductPriceManuallyEdited] = useState(false);
+  const [newProductPriceSuggestion, setNewProductPriceSuggestion] =
+    useState<PriceSuggestion | null>(null);
+  const [loadingNewProductPriceSuggestion, setLoadingNewProductPriceSuggestion] = useState(false);
   const [newService, setNewService] = useState({
     sku: "",
     name: "",
@@ -1161,6 +1192,11 @@ function App() {
   const [editCategory, setEditCategory] = useState("Medicamentos generales");
   const [editCost, setEditCost] = useState("");
   const [editPrice, setEditPrice] = useState("");
+  const [editPriceManuallyEdited, setEditPriceManuallyEdited] = useState(false);
+  const [editProductPriceSuggestion, setEditProductPriceSuggestion] =
+    useState<PriceSuggestion | null>(null);
+  const [loadingEditProductPriceSuggestion, setLoadingEditProductPriceSuggestion] =
+    useState(false);
   const [editMinStock, setEditMinStock] = useState("");
   const [editExpiresAt, setEditExpiresAt] = useState("");
   const [editActive, setEditActive] = useState(true);
@@ -1366,6 +1402,8 @@ function App() {
     );
     setEditCost(String(selectedProduct.cost));
     setEditPrice(String(selectedProduct.price));
+    setEditPriceManuallyEdited(false);
+    setEditProductPriceSuggestion(null);
     setEditMinStock(String(selectedProduct.minStock));
     setEditExpiresAt(selectedProduct.expiresAt ? selectedProduct.expiresAt.slice(0, 10) : "");
     setEditActive(selectedProduct.isActive);
@@ -1413,11 +1451,78 @@ function App() {
       return;
     }
 
+    const cost = parseFloatSafe(newProduct.cost, NaN);
+    if (Number.isNaN(cost) || cost <= 0 || newProduct.kind === "MEDICAL_SERVICE") {
+      setNewProductPriceSuggestion(null);
+      setLoadingNewProductPriceSuggestion(false);
+      return;
+    }
+
     const suggestedPrice = suggestPublicPriceFromCost(newProduct.cost, newProduct.kind);
     setNewProduct((current) =>
       current.price === suggestedPrice ? current : { ...current, price: suggestedPrice },
     );
-  }, [newProduct.cost, newProduct.kind, newProductPriceManuallyEdited]);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      setLoadingNewProductPriceSuggestion(true);
+      void apiRequest<PriceSuggestion>("/products/price-suggestion", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          name: newProduct.name.trim() || "Producto nuevo",
+          kind: newProduct.kind,
+          category:
+            newProduct.category.trim() ||
+            inferProductCategory(newProduct.name || "Producto nuevo", newProduct.kind),
+          cost,
+          price: suggestedPrice ? parseFloatSafe(suggestedPrice, 0) : undefined,
+          stock: parseIntSafe(newProduct.stock, 0),
+          minStock: parseIntSafe(newProduct.minStock, 0),
+          marketShift,
+          trigger: "manual",
+        }),
+      })
+        .then((suggestion) => {
+          if (controller.signal.aborted || newProductPriceManuallyEdited) {
+            return;
+          }
+
+          setNewProductPriceSuggestion(suggestion);
+          setNewProduct((current) => {
+            if (newProductPriceManuallyEdited) {
+              return current;
+            }
+            const nextPrice = formatSuggestedPrice(suggestion.suggestedPrice);
+            return current.price === nextPrice ? current : { ...current, price: nextPrice };
+          });
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            console.warn("No fue posible calcular sugerencia historica de precio:", error);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setLoadingNewProductPriceSuggestion(false);
+          }
+        });
+    }, 350);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [
+    marketShift,
+    newProduct.category,
+    newProduct.cost,
+    newProduct.kind,
+    newProduct.minStock,
+    newProduct.name,
+    newProduct.stock,
+    newProductPriceManuallyEdited,
+  ]);
 
   useEffect(() => {
     if (newServiceSkuManuallyEdited) {
@@ -1566,6 +1671,92 @@ function App() {
     () => products.find((product) => product.id === Number(editProductId)) ?? null,
     [editProductId, products],
   );
+
+  useEffect(() => {
+    if (!selectedEditProduct || editPriceManuallyEdited) {
+      return;
+    }
+
+    const cost = parseFloatSafe(editCost, NaN);
+    if (
+      Number.isNaN(cost) ||
+      cost <= 0 ||
+      selectedEditProduct.kind === "MEDICAL_SERVICE" ||
+      Math.abs(cost - selectedEditProduct.cost) < 0.005
+    ) {
+      setEditProductPriceSuggestion(null);
+      setLoadingEditProductPriceSuggestion(false);
+      return;
+    }
+
+    const localSuggestedPrice = suggestPublicPriceFromCost(editCost, selectedEditProduct.kind);
+    const currentPrice = parseFloatSafe(editPrice, NaN);
+    const shouldSuggestPrice =
+      !editPrice.trim() ||
+      editPrice === localSuggestedPrice ||
+      (!Number.isNaN(currentPrice) && currentPrice < cost);
+
+    if (!shouldSuggestPrice) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      setLoadingEditProductPriceSuggestion(true);
+      void apiRequest<PriceSuggestion>("/products/price-suggestion", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          productId: selectedEditProduct.id,
+          name: editProductName.trim() || selectedEditProduct.name,
+          kind: selectedEditProduct.kind,
+          category:
+            editCategory.trim() ||
+            selectedEditProduct.category ||
+            inferProductCategory(editProductName || selectedEditProduct.name, selectedEditProduct.kind),
+          cost,
+          price: Number.isNaN(currentPrice) ? selectedEditProduct.price : currentPrice,
+          stock: selectedEditProduct.stock,
+          minStock: parseIntSafe(editMinStock, selectedEditProduct.minStock),
+          marketShift,
+          trigger: "manual",
+        }),
+      })
+        .then((suggestion) => {
+          if (controller.signal.aborted || editPriceManuallyEdited) {
+            return;
+          }
+
+          setEditProductPriceSuggestion(suggestion);
+          const nextPrice = formatSuggestedPrice(suggestion.suggestedPrice);
+          setEditPrice((current) => (current === nextPrice ? current : nextPrice));
+        })
+        .catch((error) => {
+          if (!controller.signal.aborted) {
+            console.warn("No fue posible calcular sugerencia historica de edicion:", error);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setLoadingEditProductPriceSuggestion(false);
+          }
+        });
+    }, 350);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeout);
+    };
+  }, [
+    editCategory,
+    editCost,
+    editMinStock,
+    editPrice,
+    editPriceManuallyEdited,
+    editProductName,
+    marketShift,
+    selectedEditProduct,
+  ]);
 
   const selectedEditService = useMemo(
     () => services.find((service) => service.id === Number(editServiceId)) ?? null,
@@ -1826,6 +2017,7 @@ function App() {
       });
       setNewProductSkuManuallyEdited(false);
       setNewProductPriceManuallyEdited(false);
+      setNewProductPriceSuggestion(null);
       setNotice({ kind: "success", message: "Producto creado exitosamente." });
       await refreshCoreData();
     } catch (error) {
@@ -3542,8 +3734,16 @@ function App() {
                       }}
                     />
                     <p className="muted-line compact-note">
-                      Se calcula automaticamente desde el costo con margen objetivo; puedes ajustarlo manualmente.
+                      Se calcula desde costo, margen, historico de precios y rotacion; puedes ajustarlo manualmente.
                     </p>
+                    {loadingNewProductPriceSuggestion && (
+                      <p className="muted-line compact-note">Analizando historico de precios...</p>
+                    )}
+                    {newProductPriceSuggestion && !loadingNewProductPriceSuggestion && (
+                      <p className="muted-line compact-note">
+                        {formatInventoryPriceSuggestion(newProductPriceSuggestion)}
+                      </p>
+                    )}
                   </div>
                 </div>
 
@@ -3917,6 +4117,7 @@ function App() {
 
                           setEditCost(nextCost);
                           if (shouldSuggestPrice && nextSuggestedPrice) {
+                            setEditPriceManuallyEdited(false);
                             setEditPrice(nextSuggestedPrice);
                           }
                         }}
@@ -3930,11 +4131,22 @@ function App() {
                         min={0}
                         step="0.01"
                         value={editPrice}
-                        onChange={(event) => setEditPrice(event.target.value)}
+                        onChange={(event) => {
+                          setEditPriceManuallyEdited(true);
+                          setEditPrice(event.target.value);
+                        }}
                       />
                       <p className="muted-line compact-note">
-                        Si el precio venia sugerido o queda debajo del costo, se recalcula al cambiar el costo.
+                        Si el precio venia sugerido o queda debajo del costo, se recalcula con historico y rotacion.
                       </p>
+                      {loadingEditProductPriceSuggestion && (
+                        <p className="muted-line compact-note">Analizando historico del producto...</p>
+                      )}
+                      {editProductPriceSuggestion && !loadingEditProductPriceSuggestion && (
+                        <p className="muted-line compact-note">
+                          {formatInventoryPriceSuggestion(editProductPriceSuggestion)}
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="field-group">

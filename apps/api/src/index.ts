@@ -206,6 +206,19 @@ const aiAdjustmentInputSchema = z.object({
   trigger: z.enum(["manual", "monthly-cutoff", "cost-increase"]).optional(),
 });
 
+const inventoryPriceSuggestionInputSchema = z.object({
+  productId: z.number().int().positive().optional(),
+  name: z.string().min(2).max(120).optional(),
+  kind: z.nativeEnum(ProductKind).default(ProductKind.MEDICATION),
+  category: z.string().max(80).nullable().optional(),
+  cost: z.number().nonnegative(),
+  price: z.number().positive().optional(),
+  stock: z.number().int().nonnegative().optional(),
+  minStock: z.number().int().nonnegative().optional(),
+  marketShift: z.number().min(-0.25).max(0.25).optional(),
+  trigger: z.enum(["manual", "monthly-cutoff", "cost-increase"]).optional(),
+});
+
 const patientCreateSchema = z.object({
   fullName: z.string().min(2).max(120),
   phone: z.string().max(40).optional(),
@@ -662,6 +675,38 @@ type InventoryProductForPricing = {
   minStock: number;
 };
 
+type WeightedValue = {
+  value: number;
+  weight: number;
+};
+
+type PricingHistoryBucket = {
+  recentCosts: WeightedValue[];
+  olderCosts: WeightedValue[];
+  recentPrices: WeightedValue[];
+  olderPrices: WeightedValue[];
+  salePrices: WeightedValue[];
+  saleCosts: WeightedValue[];
+  saleQuantity30Days: number;
+  saleQuantity90Days: number;
+};
+
+type ProductPricingHistoryContext = {
+  historicalAverageCost: number | null;
+  historicalAveragePrice: number | null;
+  historicalAverageSalePrice: number | null;
+  recentAverageCost: number | null;
+  olderAverageCost: number | null;
+  recentAveragePrice: number | null;
+  olderAveragePrice: number | null;
+  costTrendPct: number | null;
+  priceTrendPct: number | null;
+  saleQuantity30Days: number;
+  saleQuantity90Days: number;
+  samples: number;
+  basis: "product" | "similar" | "current";
+};
+
 function targetMarginForKind(kind: ProductKindCode): number {
   return kind === ProductKind.MEDICATION ? 0.32 : 0.27;
 }
@@ -670,16 +715,302 @@ function roundPercent(value: number): number {
   return Number((value * 100).toFixed(1));
 }
 
+function createPricingHistoryBucket(): PricingHistoryBucket {
+  return {
+    recentCosts: [],
+    olderCosts: [],
+    recentPrices: [],
+    olderPrices: [],
+    salePrices: [],
+    saleCosts: [],
+    saleQuantity30Days: 0,
+    saleQuantity90Days: 0,
+  };
+}
+
+function addWeightedSample(target: WeightedValue[], value: number, weight = 1): void {
+  if (Number.isFinite(value) && value > 0) {
+    target.push({ value, weight: Math.max(1, weight) });
+  }
+}
+
+function weightedAverage(values: WeightedValue[]): number | null {
+  const totals = values.reduce(
+    (acc, item) => ({
+      value: acc.value + item.value * item.weight,
+      weight: acc.weight + item.weight,
+    }),
+    { value: 0, weight: 0 },
+  );
+
+  if (totals.weight <= 0) {
+    return null;
+  }
+
+  return totals.value / totals.weight;
+}
+
+function averageNumbers(values: Array<number | null | undefined>): number | null {
+  const finiteValues = values.filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value),
+  );
+
+  if (finiteValues.length === 0) {
+    return null;
+  }
+
+  return finiteValues.reduce((sum, value) => sum + value, 0) / finiteValues.length;
+}
+
+function buildPricingHistoryContextFromBucket(
+  bucket: PricingHistoryBucket,
+  basis: ProductPricingHistoryContext["basis"],
+): ProductPricingHistoryContext {
+  const recentAverageCost = weightedAverage(bucket.recentCosts);
+  const olderAverageCost = weightedAverage(bucket.olderCosts);
+  const recentAveragePrice = weightedAverage(bucket.recentPrices);
+  const olderAveragePrice = weightedAverage(bucket.olderPrices);
+  const historicalAverageCost = weightedAverage([
+    ...bucket.recentCosts,
+    ...bucket.olderCosts,
+    ...bucket.saleCosts,
+  ]);
+  const historicalAveragePrice = weightedAverage([
+    ...bucket.recentPrices,
+    ...bucket.olderPrices,
+    ...bucket.salePrices,
+  ]);
+  const historicalAverageSalePrice = weightedAverage(bucket.salePrices);
+  const samples =
+    bucket.recentCosts.length +
+    bucket.olderCosts.length +
+    bucket.recentPrices.length +
+    bucket.olderPrices.length +
+    bucket.salePrices.length;
+
+  return {
+    historicalAverageCost: historicalAverageCost === null ? null : roundMoney(historicalAverageCost),
+    historicalAveragePrice: historicalAveragePrice === null ? null : roundMoney(historicalAveragePrice),
+    historicalAverageSalePrice:
+      historicalAverageSalePrice === null ? null : roundMoney(historicalAverageSalePrice),
+    recentAverageCost: recentAverageCost === null ? null : roundMoney(recentAverageCost),
+    olderAverageCost: olderAverageCost === null ? null : roundMoney(olderAverageCost),
+    recentAveragePrice: recentAveragePrice === null ? null : roundMoney(recentAveragePrice),
+    olderAveragePrice: olderAveragePrice === null ? null : roundMoney(olderAveragePrice),
+    costTrendPct: changeRatio(recentAverageCost ?? 0, olderAverageCost ?? 0),
+    priceTrendPct: changeRatio(recentAveragePrice ?? 0, olderAveragePrice ?? 0),
+    saleQuantity30Days: bucket.saleQuantity30Days,
+    saleQuantity90Days: bucket.saleQuantity90Days,
+    samples,
+    basis,
+  };
+}
+
+async function buildPricingHistoryContexts(
+  products: InventoryProductForPricing[],
+  historyDays = 365,
+): Promise<Map<number, ProductPricingHistoryContext>> {
+  const productIds = products.map((product) => product.id).filter((id) => id > 0);
+  const buckets = new Map<number, PricingHistoryBucket>();
+  const historyFrom = daysAgo(historyDays);
+  const recentFrom = daysAgo(90);
+  const monthFrom = daysAgo(30);
+
+  for (const product of products) {
+    const bucket = createPricingHistoryBucket();
+    addWeightedSample(bucket.recentCosts, product.cost, 2);
+    addWeightedSample(bucket.recentPrices, product.price, 2);
+    buckets.set(product.id, bucket);
+  }
+
+  if (productIds.length > 0) {
+    const [costEvents, priceEvents, saleItems] = await Promise.all([
+      prisma.productCostEvent.findMany({
+        where: {
+          productId: { in: productIds },
+          createdAt: { gte: historyFrom },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.productPriceEvent.findMany({
+        where: {
+          productId: { in: productIds },
+          createdAt: { gte: historyFrom },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.saleItem.findMany({
+        where: {
+          productId: { in: productIds },
+          sale: { createdAt: { gte: historyFrom } },
+        },
+        select: {
+          productId: true,
+          quantity: true,
+          unitPrice: true,
+          unitCost: true,
+          sale: {
+            select: {
+              createdAt: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    for (const event of costEvents) {
+      const bucket = buckets.get(event.productId);
+      if (!bucket) {
+        continue;
+      }
+
+      if (event.createdAt >= recentFrom) {
+        addWeightedSample(bucket.recentCosts, event.newCost);
+        addWeightedSample(bucket.olderCosts, event.previousCost);
+      } else {
+        addWeightedSample(bucket.olderCosts, event.newCost);
+        addWeightedSample(bucket.olderCosts, event.previousCost);
+      }
+    }
+
+    for (const event of priceEvents) {
+      const bucket = buckets.get(event.productId);
+      if (!bucket) {
+        continue;
+      }
+
+      if (event.createdAt >= recentFrom) {
+        addWeightedSample(bucket.recentPrices, event.newPrice);
+        addWeightedSample(bucket.olderPrices, event.previousPrice);
+      } else {
+        addWeightedSample(bucket.olderPrices, event.newPrice);
+        addWeightedSample(bucket.olderPrices, event.previousPrice);
+      }
+    }
+
+    for (const item of saleItems) {
+      const bucket = buckets.get(item.productId);
+      if (!bucket) {
+        continue;
+      }
+
+      const quantity = Math.max(1, item.quantity);
+      const targetPrices = item.sale.createdAt >= recentFrom
+        ? bucket.recentPrices
+        : bucket.olderPrices;
+      const targetCosts = item.sale.createdAt >= recentFrom
+        ? bucket.recentCosts
+        : bucket.olderCosts;
+      addWeightedSample(targetPrices, item.unitPrice, quantity);
+      addWeightedSample(targetCosts, item.unitCost, quantity);
+      addWeightedSample(bucket.salePrices, item.unitPrice, quantity);
+      addWeightedSample(bucket.saleCosts, item.unitCost, quantity);
+
+      if (item.sale.createdAt >= monthFrom) {
+        bucket.saleQuantity30Days += quantity;
+      }
+      if (item.sale.createdAt >= recentFrom) {
+        bucket.saleQuantity90Days += quantity;
+      }
+    }
+  }
+
+  return new Map(
+    [...buckets.entries()].map(([productId, bucket]) => [
+      productId,
+      buildPricingHistoryContextFromBucket(bucket, "product"),
+    ]),
+  );
+}
+
+function combinePricingHistoryContexts(
+  contexts: ProductPricingHistoryContext[],
+): ProductPricingHistoryContext | null {
+  if (contexts.length === 0) {
+    return null;
+  }
+
+  const recentAverageCost = averageNumbers(contexts.map((context) => context.recentAverageCost));
+  const olderAverageCost = averageNumbers(contexts.map((context) => context.olderAverageCost));
+  const recentAveragePrice = averageNumbers(contexts.map((context) => context.recentAveragePrice));
+  const olderAveragePrice = averageNumbers(contexts.map((context) => context.olderAveragePrice));
+
+  return {
+    historicalAverageCost: averageNumbers(contexts.map((context) => context.historicalAverageCost)),
+    historicalAveragePrice: averageNumbers(contexts.map((context) => context.historicalAveragePrice)),
+    historicalAverageSalePrice: averageNumbers(
+      contexts.map((context) => context.historicalAverageSalePrice),
+    ),
+    recentAverageCost,
+    olderAverageCost,
+    recentAveragePrice,
+    olderAveragePrice,
+    costTrendPct: changeRatio(recentAverageCost ?? 0, olderAverageCost ?? 0),
+    priceTrendPct: changeRatio(recentAveragePrice ?? 0, olderAveragePrice ?? 0),
+    saleQuantity30Days: contexts.reduce((sum, context) => sum + context.saleQuantity30Days, 0),
+    saleQuantity90Days: contexts.reduce((sum, context) => sum + context.saleQuantity90Days, 0),
+    samples: contexts.reduce((sum, context) => sum + context.samples, 0),
+    basis: "similar",
+  };
+}
+
+async function buildSimilarPricingHistoryContext(
+  product: InventoryProductForPricing,
+): Promise<ProductPricingHistoryContext | null> {
+  const where: Prisma.ProductWhereInput = {
+    isActive: true,
+    kind: product.kind,
+    unit: { not: "servicio" },
+    id: product.id > 0 ? { not: product.id } : undefined,
+  };
+  if (product.category) {
+    where.category = product.category;
+  }
+
+  const similarProducts = await prisma.product.findMany({
+    where,
+    orderBy: { updatedAt: "desc" },
+    take: 30,
+  });
+
+  if (similarProducts.length === 0) {
+    return null;
+  }
+
+  const contexts = await buildPricingHistoryContexts(similarProducts);
+  return combinePricingHistoryContexts([...contexts.values()]);
+}
+
+function selectBestPricingHistoryContext(
+  productContext: ProductPricingHistoryContext | null | undefined,
+  similarContext: ProductPricingHistoryContext | null | undefined,
+): ProductPricingHistoryContext | null {
+  if (productContext && productContext.samples > 6) {
+    return productContext;
+  }
+
+  if (similarContext && similarContext.samples > 0) {
+    return similarContext;
+  }
+
+  return productContext ?? null;
+}
+
 function calculateSuggestedPublicPrice(
   product: InventoryProductForPricing,
   marketShift: number,
   recentCostIncreaseRatio: number,
   trigger: PricingTrigger,
+  history?: ProductPricingHistoryContext | null,
 ): PriceAdjustmentSuggestion {
   const currentPrice = Math.max(0.1, product.price);
   const currentCost = Math.max(0, product.cost);
   const currentMargin = currentPrice > 0 ? (currentPrice - currentCost) / currentPrice : 0;
   const targetMargin = targetMarginForKind(product.kind);
+  const historicalCostTrend = history?.costTrendPct ?? null;
+  const historicalPriceTrend = history?.priceTrendPct ?? null;
+  const historicalPriceAnchor =
+    history?.historicalAverageSalePrice ?? history?.historicalAveragePrice ?? null;
 
   const reasons: string[] = [];
   let adjustment = marketShift;
@@ -695,10 +1026,52 @@ function calculateSuggestedPublicPrice(
     );
   }
 
+  if (historicalCostTrend !== null) {
+    adjustment += clampRatio(historicalCostTrend * 0.45, -0.08, 0.14);
+    if (historicalCostTrend > 0.03) {
+      reasons.push(
+        `Historico de costos al alza (+${roundPercent(historicalCostTrend)}%).`,
+      );
+    } else if (historicalCostTrend < -0.05) {
+      reasons.push(
+        `Historico de costos a la baja (-${roundPercent(Math.abs(historicalCostTrend))}%).`,
+      );
+    }
+  }
+
+  if (historicalPriceTrend !== null) {
+    adjustment += clampRatio(historicalPriceTrend * 0.2, -0.04, 0.06);
+    if (historicalPriceTrend > 0.05) {
+      reasons.push(
+        `Precio publico historico viene subiendo (+${roundPercent(historicalPriceTrend)}%).`,
+      );
+    } else if (historicalPriceTrend < -0.08) {
+      reasons.push(
+        `Precio publico historico viene bajando (-${roundPercent(Math.abs(historicalPriceTrend))}%).`,
+      );
+    }
+  }
+
+  if (historicalPriceAnchor !== null) {
+    reasons.push(`Promedio historico de venta/precio: $${roundMoney(historicalPriceAnchor)}.`);
+  }
+
   if (currentMargin < targetMargin) {
     reasons.push(
       `Margen bajo (${roundPercent(currentMargin)}%). Objetivo: ${roundPercent(targetMargin)}%.`,
     );
+  }
+
+  if ((history?.saleQuantity90Days ?? 0) >= 15) {
+    adjustment += 0.03;
+    reasons.push(`Alta rotacion reciente: ${history?.saleQuantity90Days} unidades en 90 dias.`);
+  } else if (
+    (history?.saleQuantity90Days ?? 0) <= 1 &&
+    product.minStock > 0 &&
+    product.stock >= product.minStock * 2
+  ) {
+    adjustment -= 0.04;
+    reasons.push("Baja rotacion con stock suficiente: se puede bajar ligeramente para mover inventario.");
   }
 
   if (product.stock <= product.minStock) {
@@ -713,10 +1086,35 @@ function calculateSuggestedPublicPrice(
   const marginFloorPrice = currentCost > 0
     ? currentCost / Math.max(0.1, 1 - targetMargin)
     : marketShiftPrice;
+  const historicalTrendPrice = historicalPriceAnchor === null
+    ? 0
+    : historicalPriceAnchor *
+      (1 + clampRatio((historicalCostTrend ?? 0) * 0.5, -0.08, 0.12));
 
-  const suggestedPrice = roundMoney(
-    Math.max(0.1, marketShiftPrice, marginFloorPrice, currentCost * 1.05),
+  let suggestedBase = Math.max(
+    0.1,
+    marketShiftPrice,
+    marginFloorPrice,
+    currentCost * 1.05,
+    historicalTrendPrice,
   );
+
+  if (
+    historicalPriceAnchor !== null &&
+    currentPrice > historicalPriceAnchor * 1.25 &&
+    (historicalCostTrend ?? 0) <= 0.02 &&
+    product.minStock > 0 &&
+    product.stock >= product.minStock
+  ) {
+    suggestedBase = Math.max(
+      marginFloorPrice,
+      currentCost * 1.05,
+      historicalPriceAnchor * 1.08,
+    );
+    reasons.push("Precio actual alto contra el historico; se sugiere bajar para recuperar rotacion.");
+  }
+
+  const suggestedPrice = roundMoney(suggestedBase);
 
   return {
     productId: product.id,
@@ -729,6 +1127,20 @@ function calculateSuggestedPublicPrice(
     confidence: trigger === "monthly-cutoff" ? 0.78 : 0.72,
     currentCost: roundMoney(currentCost),
     currentPrice: roundMoney(currentPrice),
+    historicalAverageCost:
+      history?.historicalAverageCost === undefined ? null : history.historicalAverageCost,
+    historicalAveragePrice:
+      history?.historicalAveragePrice === undefined ? null : history.historicalAveragePrice,
+    historicalAverageSalePrice:
+      history?.historicalAverageSalePrice === undefined
+        ? null
+        : history.historicalAverageSalePrice,
+    costTrendPct:
+      historicalCostTrend === null ? null : roundPercent(historicalCostTrend),
+    priceTrendPct:
+      historicalPriceTrend === null ? null : roundPercent(historicalPriceTrend),
+    saleQuantity90Days: history?.saleQuantity90Days ?? 0,
+    historyBasis: history?.basis ?? "current",
     marginPct: roundPercent(currentMargin),
     trigger,
     source: "local",
@@ -770,7 +1182,7 @@ async function buildPriceSuggestions(
   });
   const productNameById = new Map(products.map((product) => [product.id, product.name]));
 
-  const [recentCostIncreaseByProduct, recentPriceEvents] = await Promise.all([
+  const [recentCostIncreaseByProduct, recentPriceEvents, pricingHistoryByProduct] = await Promise.all([
     getRecentCostIncreaseRatios(),
     prisma.productPriceEvent.findMany({
       where: {
@@ -778,6 +1190,7 @@ async function buildPriceSuggestions(
       },
       orderBy: { createdAt: "desc" },
     }),
+    buildPricingHistoryContexts(products),
   ]);
   const priceHistoryByProduct = new Map<number, number[]>();
   for (const event of recentPriceEvents) {
@@ -793,6 +1206,19 @@ async function buildPriceSuggestions(
     trigger,
     products,
     recentCostIncreaseByProduct: Object.fromEntries(recentCostIncreaseByProduct),
+    pricingHistoryByProduct: Object.fromEntries(
+      [...pricingHistoryByProduct.entries()].map(([productId, history]) => [
+        productId,
+        {
+          historicalAverageCost: history.historicalAverageCost,
+          historicalAveragePrice: history.historicalAveragePrice,
+          historicalAverageSalePrice: history.historicalAverageSalePrice,
+          costTrendPct: history.costTrendPct === null ? null : roundPercent(history.costTrendPct),
+          priceTrendPct: history.priceTrendPct === null ? null : roundPercent(history.priceTrendPct),
+          saleQuantity90Days: history.saleQuantity90Days,
+        },
+      ]),
+    ),
   });
 
   if (externalSuggestions && externalSuggestions.length > 0) {
@@ -813,6 +1239,7 @@ async function buildPriceSuggestions(
       marketShift,
       recentCostIncreaseByProduct.get(product.id) ?? 0,
       trigger,
+      pricingHistoryByProduct.get(product.id),
     );
     const priceHistory = priceHistoryByProduct.get(product.id) ?? [];
     if (priceHistory.length > 0) {
@@ -837,6 +1264,57 @@ async function buildPriceSuggestions(
     source: "local",
     suggestions: localSuggestions,
   };
+}
+
+async function buildInventoryPriceSuggestion(
+  input: z.infer<typeof inventoryPriceSuggestionInputSchema>,
+): Promise<PriceAdjustmentSuggestion> {
+  const existingProduct = input.productId
+    ? await prisma.product.findUnique({ where: { id: input.productId } })
+    : null;
+
+  if (input.productId && !existingProduct) {
+    throw new ApiError(404, "Producto no encontrado para sugerir precio.");
+  }
+
+  const kind = existingProduct?.kind ?? input.kind;
+  if (kind === serviceKind) {
+    throw new ApiError(400, "Los servicios no usan sugerencias de inventario.");
+  }
+
+  const name = input.name?.trim() || existingProduct?.name || "Producto nuevo";
+  const category =
+    input.category?.trim() ||
+    existingProduct?.category ||
+    inferProductCategory(name, kind);
+  const product: InventoryProductForPricing = {
+    id: existingProduct?.id ?? 0,
+    name,
+    kind,
+    category,
+    cost: input.cost,
+    price: input.price ?? existingProduct?.price ?? 0.1,
+    stock: input.stock ?? existingProduct?.stock ?? 0,
+    minStock: input.minStock ?? existingProduct?.minStock ?? 0,
+  };
+
+  const [productContextMap, similarContext] = await Promise.all([
+    product.id > 0 ? buildPricingHistoryContexts([product]) : Promise.resolve(new Map()),
+    buildSimilarPricingHistoryContext(product),
+  ]);
+  const history = selectBestPricingHistoryContext(
+    productContextMap.get(product.id),
+    similarContext,
+  );
+  const recentCostIncreaseRatio = Math.max(0, history?.costTrendPct ?? 0);
+
+  return calculateSuggestedPublicPrice(
+    product,
+    input.marketShift ?? 0,
+    recentCostIncreaseRatio,
+    input.trigger ?? "manual",
+    history,
+  );
 }
 
 function buildDefaultLotCode(productSku: string, suffix = "LOT"): string {
@@ -3173,6 +3651,16 @@ app.get(
 );
 
 app.post(
+  "/api/products/price-suggestion",
+  asyncHandler(async (req, res) => {
+    const payload = inventoryPriceSuggestionInputSchema.parse(req.body ?? {});
+    const suggestion = await buildInventoryPriceSuggestion(payload);
+
+    res.json(suggestion);
+  }),
+);
+
+app.post(
   "/api/products",
   asyncHandler(async (req, res) => {
     const payload = productCreateSchema.parse(req.body);
@@ -3232,6 +3720,27 @@ app.post(
           lotCode: payload.lotCode,
           expiresAt: resolvedExpiresAt,
           cost: resolvedCost,
+        });
+      }
+
+      if (payload.kind !== serviceKind) {
+        await tx.productCostEvent.create({
+          data: {
+            productId: created.id,
+            previousCost: resolvedCost,
+            newCost: resolvedCost,
+            changePct: 0,
+            reason: "Costo inicial registrado.",
+          },
+        });
+        await tx.productPriceEvent.create({
+          data: {
+            productId: created.id,
+            previousPrice: created.price,
+            newPrice: created.price,
+            changePct: 0,
+            reason: "Precio publico inicial registrado.",
+          },
         });
       }
 
@@ -3378,7 +3887,7 @@ app.put(
       if (
         nextKind !== serviceKind &&
         typeof payload.cost === "number" &&
-        payload.cost > previousProduct.cost
+        payload.cost !== previousProduct.cost
       ) {
         const previousCost = previousProduct.cost;
         const newCost = payload.cost;
@@ -3390,9 +3899,22 @@ app.put(
             previousCost,
             newCost,
             changePct,
-            reason: "Aumento de costo detectado en inventario.",
+            reason:
+              newCost > previousCost
+                ? "Aumento de costo detectado en inventario."
+                : "Disminucion de costo detectada en inventario.",
           },
         });
+      }
+
+      if (
+        nextKind !== serviceKind &&
+        typeof payload.cost === "number" &&
+        payload.cost > previousProduct.cost
+      ) {
+        const previousCost = previousProduct.cost;
+        const newCost = payload.cost;
+        const changePct = previousCost > 0 ? (newCost - previousCost) / previousCost : 1;
 
         const suggestedPrice = roundMoney(
           Math.max(
