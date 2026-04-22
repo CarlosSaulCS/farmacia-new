@@ -44,7 +44,7 @@ npm install
 npm run db:push
 ```
 
-3. Cargar datos iniciales:
+3. Cargar catalogo base opcional, sin datos de prueba:
 
 ```bash
 npm run db:seed
@@ -64,7 +64,7 @@ npm run dev
 - npm run dev: inicia API + Web en paralelo
 - npm run build: compila API + Web + desktop
 - npm run db:push: sincroniza prisma schema con SQLite
-- npm run db:seed: carga productos/citas de ejemplo
+- npm run db:seed: carga catalogo base sin datos de prueba
 - npm run package:desktop: compila web y genera instalador desktop
 
 ## Variables de Entorno

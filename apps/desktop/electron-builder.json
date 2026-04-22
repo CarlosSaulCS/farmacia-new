@@ -33,7 +33,6 @@
       "from": "../api/prisma",
       "to": "api/prisma",
       "filter": [
-        "dev.db",
         "schema.prisma"
       ]
     },

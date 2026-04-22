@@ -104,12 +104,16 @@ async function ensurePackagedDatabase(runtimeDirectory) {
     return userDatabasePath;
   } catch {
     const seededDatabasePath = path.join(runtimeDirectory, "prisma", "dev.db");
-    try {
-      await fs.copyFile(seededDatabasePath, userDatabasePath);
-    } catch (error) {
-      console.warn("No se pudo copiar base seed. Se creara una nueva DB local.", error);
-      await fs.writeFile(userDatabasePath, "");
+    if (fsSync.existsSync(seededDatabasePath)) {
+      try {
+        await fs.copyFile(seededDatabasePath, userDatabasePath);
+        return userDatabasePath;
+      } catch (error) {
+        console.warn("No se pudo copiar base seed. Se creara una nueva DB local.", error);
+      }
     }
+
+    await fs.writeFile(userDatabasePath, "");
 
     return userDatabasePath;
   }

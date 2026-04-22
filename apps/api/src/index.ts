@@ -29,8 +29,6 @@ const {
 
 type ProductKindCode = import("@prisma/client").ProductKind;
 type AppointmentStatusCode = import("@prisma/client").AppointmentStatus;
-type FollowUpStatusCode = import("@prisma/client").FollowUpStatus;
-type CashSessionStatusCode = import("@prisma/client").CashSessionStatus;
 type CashMovementTypeCode = import("@prisma/client").CashMovementType;
 
 class ApiError extends Error {

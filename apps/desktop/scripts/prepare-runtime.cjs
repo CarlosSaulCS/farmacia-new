@@ -57,7 +57,10 @@ async function main() {
     logLevel: "silent",
   });
 
-  await copyDirectory(apiPrisma, path.join(runtimeApiRoot, "prisma"));
+  await copyFile(
+    path.join(apiPrisma, "schema.prisma"),
+    path.join(runtimeApiRoot, "prisma", "schema.prisma"),
+  );
   await copyFile(apiPackageJson, path.join(runtimeApiRoot, "package.json"));
   await copyDirectory(
     prismaClientPackage,
