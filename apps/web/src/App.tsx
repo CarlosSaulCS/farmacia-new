@@ -481,6 +481,32 @@ function analysisMetricNumber(snapshot: AnalysisSnapshot, key: string): number |
   return typeof value === "number" ? value : null;
 }
 
+function buildConsultationSummary(input: {
+  serviceType: string;
+  diagnosis: string;
+  treatment: string;
+  observations: string;
+}): string | undefined {
+  const detail =
+    input.diagnosis.trim() || input.treatment.trim() || input.observations.trim();
+  if (detail) {
+    return detail.length > 220 ? `${detail.slice(0, 217)}...` : detail;
+  }
+
+  const serviceType = input.serviceType.trim();
+  return serviceType ? `Servicio registrado: ${serviceType}` : undefined;
+}
+
+function consultationPreview(consultation: Consultation): string {
+  return (
+    consultation.summary ||
+    consultation.diagnosis ||
+    consultation.treatment ||
+    consultation.observations ||
+    "Sin notas adicionales."
+  );
+}
+
 function normalizeReorderReportParams(days: string, coverage: string) {
   return {
     daysValue: Math.max(1, Math.min(120, parseIntSafe(days, 30))),
@@ -1233,7 +1259,6 @@ function App() {
     appointmentId: "",
     serviceProductId: "",
     serviceType: "Consulta General",
-    summary: "",
     diagnosis: "",
     treatment: "",
     observations: "",
@@ -1662,6 +1687,17 @@ function App() {
         .sort((a, b) => (a.followUpAt ?? "").localeCompare(b.followUpAt ?? "")),
     [consultations],
   );
+
+  const selectedPatientConsultations = useMemo(() => {
+    const patientId = consultationForm.patientId ? Number(consultationForm.patientId) : NaN;
+    const source = Number.isNaN(patientId)
+      ? consultations
+      : consultations.filter((consultation) => consultation.patientId === patientId);
+
+    return [...source]
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 6);
+  }, [consultationForm.patientId, consultations]);
 
   const selectedLots = useMemo(() => {
     if (!stockProductId) {
@@ -2509,7 +2545,7 @@ function App() {
             ? Number(consultationForm.serviceProductId)
             : undefined,
           serviceType: consultationForm.serviceType.trim(),
-          summary: consultationForm.summary.trim() || undefined,
+          summary: buildConsultationSummary(consultationForm),
           diagnosis: consultationForm.diagnosis.trim() || undefined,
           treatment: consultationForm.treatment.trim() || undefined,
           observations: consultationForm.observations.trim() || undefined,
@@ -2522,7 +2558,6 @@ function App() {
       setConsultationForm((current) => ({
         ...current,
         appointmentId: "",
-        summary: "",
         diagnosis: "",
         treatment: "",
         observations: "",
@@ -4979,7 +5014,7 @@ function App() {
                   <h3>Consulta y servicio medico</h3>
                 </div>
               </div>
-              <form className="field-grid" onSubmit={createConsultation}>
+              <form className="consultation-form" onSubmit={createConsultation}>
                 <div className="field-grid two-col">
                   <div className="field-group">
                     <label htmlFor="consultation-patient">Paciente</label>
@@ -5060,88 +5095,102 @@ function App() {
                   </div>
                 </div>
 
-                <div className="field-group">
-                  <label htmlFor="consultation-summary">Resumen ejecutivo</label>
-                  <textarea
-                    id="consultation-summary"
-                    rows={2}
-                    value={consultationForm.summary}
-                    onChange={(event) =>
-                      setConsultationForm((current) => ({
-                        ...current,
-                        summary: event.target.value,
-                      }))
-                    }
-                    placeholder="Resumen corto para el administrador"
-                  />
-                </div>
+                <details className="compact-details consultation-details">
+                  <summary>Notas clinicas opcionales</summary>
+                  <div className="details-content consultation-details-grid">
+                    <div className="field-grid two-col">
+                      <div className="field-group">
+                        <label htmlFor="consultation-diagnosis">Diagnostico / hallazgo</label>
+                        <textarea
+                          id="consultation-diagnosis"
+                          rows={3}
+                          value={consultationForm.diagnosis}
+                          onChange={(event) =>
+                            setConsultationForm((current) => ({
+                              ...current,
+                              diagnosis: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="field-group">
+                        <label htmlFor="consultation-treatment">Tratamiento / accion</label>
+                        <textarea
+                          id="consultation-treatment"
+                          rows={3}
+                          value={consultationForm.treatment}
+                          onChange={(event) =>
+                            setConsultationForm((current) => ({
+                              ...current,
+                              treatment: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
 
-                <div className="field-grid two-col">
+                    <div className="field-group">
+                      <label htmlFor="consultation-observations">Observaciones</label>
+                      <textarea
+                        id="consultation-observations"
+                        rows={3}
+                        value={consultationForm.observations}
+                        onChange={(event) =>
+                          setConsultationForm((current) => ({
+                            ...current,
+                            observations: event.target.value,
+                          }))
+                        }
+                        placeholder="Notas clinicas o administrativas"
+                      />
+                    </div>
+                    <p className="muted-line consultation-helper">
+                      El resumen administrativo se genera automaticamente con estas notas.
+                    </p>
+                  </div>
+                </details>
+
+                <div className="consultation-action-row">
                   <div className="field-group">
-                    <label htmlFor="consultation-diagnosis">Diagnostico / hallazgo</label>
-                    <textarea
-                      id="consultation-diagnosis"
-                      rows={3}
-                      value={consultationForm.diagnosis}
+                    <label htmlFor="consultation-follow-up">Seguimiento para</label>
+                    <input
+                      id="consultation-follow-up"
+                      type="datetime-local"
+                      value={consultationForm.followUpAt}
                       onChange={(event) =>
                         setConsultationForm((current) => ({
                           ...current,
-                          diagnosis: event.target.value,
+                          followUpAt: event.target.value,
                         }))
                       }
                     />
                   </div>
-                  <div className="field-group">
-                    <label htmlFor="consultation-treatment">Tratamiento / accion</label>
-                    <textarea
-                      id="consultation-treatment"
-                      rows={3}
-                      value={consultationForm.treatment}
-                      onChange={(event) =>
-                        setConsultationForm((current) => ({
-                          ...current,
-                          treatment: event.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
 
-                <div className="field-group">
-                  <label htmlFor="consultation-observations">Observaciones</label>
-                  <textarea
-                    id="consultation-observations"
-                    rows={3}
-                    value={consultationForm.observations}
-                    onChange={(event) =>
-                      setConsultationForm((current) => ({
-                        ...current,
-                        observations: event.target.value,
-                      }))
-                    }
-                    placeholder="Notas clinicas o administrativas"
-                  />
+                  <button className="primary-btn" type="submit" disabled={savingConsultation}>
+                    {savingConsultation ? "Guardando..." : "Registrar Consulta"}
+                  </button>
                 </div>
-
-                <div className="field-group">
-                  <label htmlFor="consultation-follow-up">Seguimiento para</label>
-                  <input
-                    id="consultation-follow-up"
-                    type="datetime-local"
-                    value={consultationForm.followUpAt}
-                    onChange={(event) =>
-                      setConsultationForm((current) => ({
-                        ...current,
-                        followUpAt: event.target.value,
-                      }))
-                    }
-                  />
-                </div>
-
-                <button className="primary-btn" type="submit" disabled={savingConsultation}>
-                  {savingConsultation ? "Guardando..." : "Registrar Consulta"}
-                </button>
               </form>
+              <details className="compact-details consultation-history">
+                <summary>Historial reciente</summary>
+                <div className="details-content">
+                  <div className="agenda-list compact-list">
+                    {selectedPatientConsultations.map((consultation) => (
+                      <div key={consultation.id} className="agenda-item">
+                        <div>
+                          <strong>{consultation.patient.fullName}</strong>
+                          <p>{consultation.serviceType}</p>
+                          <small>{datetimeFormatter.format(new Date(consultation.createdAt))}</small>
+                        </div>
+                        <small>{consultationPreview(consultation)}</small>
+                      </div>
+                    ))}
+                    {selectedPatientConsultations.length === 0 && (
+                      <p className="empty-cell">Sin consultas registradas para este paciente.</p>
+                    )}
+                  </div>
+                </div>
+              </details>
               </article>
             </div>
           </div>

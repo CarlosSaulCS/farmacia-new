@@ -910,28 +910,34 @@
   min-height: 74px;
 }
 
-.appointment-consult-card > form {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+.consultation-form {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  align-items: start;
 }
 
-.appointment-consult-card > form > .field-grid.two-col {
-  grid-column: span 6;
+.consultation-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.72fr);
+  gap: 10px;
+  align-items: end;
 }
 
-.appointment-consult-card > form > .field-group,
-.appointment-consult-card > form > button {
-  grid-column: span 4;
+.consultation-action-row .primary-btn {
+  min-height: 48px;
 }
 
-.appointment-consult-card > form > .field-group:nth-child(3) {
-  grid-column: span 4;
+.consultation-details-grid {
+  gap: 10px;
 }
 
-.appointment-consult-card > form > .field-grid.two-col:nth-child(4) {
-  grid-column: span 8;
+.consultation-helper {
+  padding: 0 2px;
+}
+
+.consultation-history .agenda-item > small {
+  max-width: 48%;
+  text-align: right;
 }
 
 .appointment-agenda-card .agenda-list,
@@ -2031,14 +2037,13 @@
     flex-direction: column;
   }
 
-  .appointment-consult-card > form {
+  .consultation-action-row {
     grid-template-columns: 1fr;
   }
 
-  .appointment-consult-card > form > .field-grid.two-col,
-  .appointment-consult-card > form > .field-group,
-  .appointment-consult-card > form > button {
-    grid-column: 1 / -1;
+  .consultation-history .agenda-item > small {
+    max-width: none;
+    text-align: left;
   }
 
   .catalog-meta,
