@@ -4713,7 +4713,7 @@ function App() {
           </div>
 
           <div className="appointments-grid">
-            <article className="surface">
+            <article className="surface appointment-booking-card">
               <h3>Nueva Cita</h3>
               <form className="field-grid" onSubmit={createAppointment}>
                 <div className="field-grid two-col">
@@ -4805,7 +4805,7 @@ function App() {
               </form>
             </article>
 
-            <article className="surface">
+            <article className="surface appointment-agenda-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Agenda</h3>
@@ -4882,7 +4882,7 @@ function App() {
               </div>
             </article>
 
-            <article className="surface">
+            <article className="surface appointment-patients-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Pacientes y seguimiento</h3>
@@ -4969,7 +4969,7 @@ function App() {
               </details>
             </article>
 
-            <article className="surface">
+            <article className="surface appointment-consult-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Consulta y servicio medico</h3>
@@ -5269,7 +5269,7 @@ function App() {
           </article>
 
           <div className="reports-grid">
-            <article className="surface">
+            <article className="surface report-sales-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Reporte de ventas</h3>
@@ -5605,7 +5605,7 @@ function App() {
               )}
             </article>
 
-            <article className="surface" id="reorder-report-section">
+            <article className="surface report-reorder-card" id="reorder-report-section">
               <div className="surface-head compact">
                 <div>
                   <h3>Stock minimo para surtir</h3>
@@ -5685,7 +5685,7 @@ function App() {
               )}
             </article>
 
-            <article className="surface">
+            <article className="surface report-analysis-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Analisis operativo</h3>
@@ -5748,7 +5748,7 @@ function App() {
               </details>
             </article>
 
-            <article className="surface">
+            <article className="surface report-log-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Bitacora y caja</h3>
