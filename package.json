@@ -15,7 +15,8 @@
     "build": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run build --workspace @farmacia/desktop",
     "db:push": "npm run db:push --workspace @farmacia/api",
     "db:seed": "npm run db:seed --workspace @farmacia/api",
-    "package:desktop": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run dist --workspace @farmacia/desktop"
+    "package:desktop": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run dist --workspace @farmacia/desktop",
+    "package:desktop:signed": "npm run build --workspace @farmacia/api && npm run build --workspace @farmacia/web && npm run dist:signed --workspace @farmacia/desktop"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

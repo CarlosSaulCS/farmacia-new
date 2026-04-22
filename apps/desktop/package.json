@@ -2,13 +2,14 @@
   "name": "@farmacia/desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Sistema para Farmacia - Power by Code Solutions Studio",
+  "description": "Sistema para Farmacia - Powered by Code Solutions Studio",
   "author": "Code Solutions Studio",
   "main": "main.cjs",
   "scripts": {
     "dev": "electron .",
     "build": "node -e \"console.log('Desktop runtime listo (sin transpilar).')\"",
-    "dist": "node scripts/prepare-runtime.cjs && electron-builder --config electron-builder.json --publish never"
+    "dist": "node scripts/prepare-runtime.cjs && electron-builder --config electron-builder.json --publish never",
+    "dist:signed": "node scripts/prepare-runtime.cjs && electron-builder --config electron-builder.signed.json --publish never"
   },
   "dependencies": {
     "@prisma/client": "^6.8.2",

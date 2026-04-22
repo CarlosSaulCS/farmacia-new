@@ -172,6 +172,19 @@ Se genera instalador NSIS en:
 
 - apps/desktop/dist
 
+### Documentacion comercial y operativa
+
+- Manual rapido de uso: docs/MANUAL_RAPIDO_USO.md
+- Firma del instalador Windows: docs/FIRMA_INSTALADOR_WINDOWS.md
+- Politicas legales base: docs/POLITICAS_LEGALES_PLANTILLA.md
+- Versionado y actualizaciones: docs/VERSIONADO_ACTUALIZACIONES.md
+
+Para builds firmados, configurar `CSC_LINK` y `CSC_KEY_PASSWORD` y ejecutar:
+
+```bash
+npm run package:desktop:signed
+```
+
 ## Operacion Offline (Sin Hosting)
 
 - El instalador incluye interfaz web compilada y runtime local de API.

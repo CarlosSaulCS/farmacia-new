@@ -61,8 +61,8 @@
     "signtoolOptions": {
       "publisherName": "Code Solutions Studio"
     },
-    "signAndEditExecutable": false,
-    "verifyUpdateCodeSignature": false,
+    "signAndEditExecutable": true,
+    "verifyUpdateCodeSignature": true,
     "legalTrademarks": "Code Solutions Studio",
     "target": [
       {
