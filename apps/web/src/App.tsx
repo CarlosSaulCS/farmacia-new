@@ -47,7 +47,13 @@ type SaleItem = {
   productId: number;
   quantity: number;
   unitPrice: number;
+  unitCost?: number;
   lineTotal: number;
+  productSku?: string | null;
+  productName?: string | null;
+  productCommercialName?: string | null;
+  productKind?: Product["kind"] | null;
+  productCategory?: string | null;
   product: Product;
 };
 

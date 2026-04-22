@@ -74,14 +74,20 @@ model Sale {
 }
 
 model SaleItem {
-  id        Int     @id @default(autoincrement())
-  saleId    Int
-  productId Int
-  quantity  Int
-  unitPrice Float
-  lineTotal Float
-  sale      Sale    @relation(fields: [saleId], references: [id], onDelete: Cascade)
-  product   Product @relation(fields: [productId], references: [id])
+  id                    Int          @id @default(autoincrement())
+  saleId                Int
+  productId             Int
+  quantity              Int
+  unitPrice             Float
+  unitCost              Float        @default(0)
+  lineTotal             Float
+  productSku            String?
+  productName           String?
+  productCommercialName String?
+  productKind           ProductKind?
+  productCategory       String?
+  sale                  Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product               Product      @relation(fields: [productId], references: [id])
 }
 
 enum AppointmentStatus {

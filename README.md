@@ -136,7 +136,7 @@ El endpoint GET /api/reports/sales incluye analitica ampliada para control opera
 - Productos sin ventas en el periodo
 - Tabla de desempeno por producto (ID, SKU, ingreso, costo y utilidad estimada)
 
-Esto permite auditar correctamente ventas, inventario y rentabilidad en un solo flujo.
+Cada linea de venta conserva snapshot de SKU, nombre, nombre comercial, categoria y costo unitario al momento de cobrar. Esto permite auditar correctamente ventas, inventario y rentabilidad en un solo flujo, incluso si despues se actualiza el producto.
 
 - IA AION
   - POST /api/ai/price-adjustments

@@ -1432,7 +1432,13 @@ async function ensureSchemaCompatibility() {
       "productId" INTEGER NOT NULL,
       "quantity" INTEGER NOT NULL,
       "unitPrice" REAL NOT NULL,
-      "lineTotal" REAL NOT NULL
+      "unitCost" REAL NOT NULL DEFAULT 0,
+      "lineTotal" REAL NOT NULL,
+      "productSku" TEXT,
+      "productName" TEXT,
+      "productCommercialName" TEXT,
+      "productKind" TEXT,
+      "productCategory" TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS "Consultation" (
       "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -1534,6 +1540,12 @@ async function ensureSchemaCompatibility() {
     'ALTER TABLE "Product" ADD COLUMN "commercialName" TEXT',
     'ALTER TABLE "Sale" ADD COLUMN "amountPaid" REAL',
     'ALTER TABLE "Sale" ADD COLUMN "changeGiven" REAL',
+    'ALTER TABLE "SaleItem" ADD COLUMN "unitCost" REAL NOT NULL DEFAULT 0',
+    'ALTER TABLE "SaleItem" ADD COLUMN "productSku" TEXT',
+    'ALTER TABLE "SaleItem" ADD COLUMN "productName" TEXT',
+    'ALTER TABLE "SaleItem" ADD COLUMN "productCommercialName" TEXT',
+    'ALTER TABLE "SaleItem" ADD COLUMN "productKind" TEXT',
+    'ALTER TABLE "SaleItem" ADD COLUMN "productCategory" TEXT',
     'ALTER TABLE "Appointment" ADD COLUMN "patientId" INTEGER',
     'ALTER TABLE "Appointment" ADD COLUMN "patientPhone" TEXT',
     'ALTER TABLE "InventoryMovement" ADD COLUMN "lotCode" TEXT',
@@ -1762,7 +1774,6 @@ async function buildSalesReport(from: Date, to: Date) {
       cost: true,
     },
   });
-  const productById = new Map(productsForPeriod.map((product) => [product.id, product]));
   const saleIds = sales.map((sale) => sale.id);
   const saleCashMovements = saleIds.length > 0
     ? await prisma.cashMovement.findMany({
@@ -1825,15 +1836,18 @@ async function buildSalesReport(from: Date, to: Date) {
 
   for (const sale of sales) {
     for (const item of sale.items) {
-      const productSnapshot = productById.get(item.productId);
-      const unitCost = productSnapshot?.cost ?? item.product.cost;
+      const unitCost = item.unitCost > 0 ? item.unitCost : item.product.cost;
       const lineCost = item.quantity * unitCost;
+      const productSku = item.productSku ?? item.product.sku;
+      const productName = item.productName ?? item.product.name;
+      const productCommercialName =
+        item.productCommercialName ?? item.product.commercialName;
 
       const current = productAccumulator.get(item.productId) ?? {
         productId: item.productId,
-        sku: item.product.sku,
-        productName: item.product.name,
-        productCommercialName: item.product.commercialName,
+        sku: productSku,
+        productName,
+        productCommercialName,
         quantity: 0,
         revenue: 0,
         estimatedCost: 0,
@@ -3381,7 +3395,13 @@ app.post(
             productId: product.id,
             quantity: item.quantity,
             unitPrice: product.price,
+            unitCost: product.cost,
             lineTotal,
+            productSku: product.sku,
+            productName: product.name,
+            productCommercialName: product.commercialName,
+            productKind: product.kind,
+            productCategory: product.category,
           },
         });
       }
