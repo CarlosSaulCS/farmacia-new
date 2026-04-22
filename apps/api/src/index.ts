@@ -1534,6 +1534,20 @@ async function ensureSchemaCompatibility() {
       "payload" JSONB NOT NULL,
       "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
+    `CREATE TABLE IF NOT EXISTS "AnalysisSnapshot" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "scope" TEXT NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'local',
+      "periodFrom" DATETIME,
+      "periodTo" DATETIME,
+      "summary" TEXT NOT NULL,
+      "insights" JSONB NOT NULL,
+      "metrics" JSONB NOT NULL,
+      "recommendations" JSONB,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "AnalysisSnapshot_scope_createdAt_idx" ON "AnalysisSnapshot"("scope","createdAt")',
+    'CREATE INDEX IF NOT EXISTS "AnalysisSnapshot_periodFrom_periodTo_idx" ON "AnalysisSnapshot"("periodFrom","periodTo")',
   ];
 
   const compatibilityStatements = [
@@ -1630,6 +1644,20 @@ async function ensureSchemaCompatibility() {
       "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
     'CREATE INDEX IF NOT EXISTS "AuditLog_entityType_createdAt_idx" ON "AuditLog"("entityType","createdAt")',
+    `CREATE TABLE IF NOT EXISTS "AnalysisSnapshot" (
+      "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+      "scope" TEXT NOT NULL,
+      "source" TEXT NOT NULL DEFAULT 'local',
+      "periodFrom" DATETIME,
+      "periodTo" DATETIME,
+      "summary" TEXT NOT NULL,
+      "insights" JSONB NOT NULL,
+      "metrics" JSONB NOT NULL,
+      "recommendations" JSONB,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`,
+    'CREATE INDEX IF NOT EXISTS "AnalysisSnapshot_scope_createdAt_idx" ON "AnalysisSnapshot"("scope","createdAt")',
+    'CREATE INDEX IF NOT EXISTS "AnalysisSnapshot_periodFrom_periodTo_idx" ON "AnalysisSnapshot"("periodFrom","periodTo")',
     'CREATE INDEX IF NOT EXISTS "Appointment_appointmentAt_status_idx" ON "Appointment"("appointmentAt","status")',
     'CREATE INDEX IF NOT EXISTS "Appointment_patientId_idx" ON "Appointment"("patientId")',
   ];
@@ -2468,6 +2496,261 @@ async function buildOperationalAlerts(limit = 40) {
     total: sorted.length,
     alerts: sorted.slice(0, limit),
   };
+}
+
+type AnalysisMetrics = Record<string, number | string | boolean | null>;
+type AnalysisRecommendation = {
+  area: "sales" | "inventory" | "appointments" | "cash" | "pricing";
+  priority: "critical" | "high" | "medium" | "low";
+  message: string;
+};
+
+function metricNumber(
+  metrics: Prisma.JsonValue | null | undefined,
+  key: string,
+): number | null {
+  if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
+    return null;
+  }
+
+  const value = (metrics as Record<string, Prisma.JsonValue>)[key];
+  return typeof value === "number" ? value : null;
+}
+
+function buildTrendInsight(
+  label: string,
+  current: number,
+  previous: number | null,
+  options: { unit?: string; higherIsGood?: boolean; thresholdPct?: number } = {},
+): string | null {
+  if (previous === null || previous <= 0) {
+    return null;
+  }
+
+  const thresholdPct = options.thresholdPct ?? 0.08;
+  const deltaPct = (current - previous) / previous;
+  if (Math.abs(deltaPct) < thresholdPct) {
+    return null;
+  }
+
+  const direction = deltaPct > 0 ? "subio" : "bajo";
+  const impact =
+    options.higherIsGood === undefined
+      ? ""
+      : deltaPct > 0 === options.higherIsGood
+        ? " favorable"
+        : " a vigilar";
+  const unit = options.unit ?? "";
+  return `${label} ${direction} ${roundPercent(Math.abs(deltaPct))}% vs el analisis anterior (${roundMoney(previous)}${unit} -> ${roundMoney(current)}${unit})${impact}.`;
+}
+
+async function buildOperationalAnalysisBase(periodDays = 30) {
+  const periodFrom = daysAgo(periodDays);
+  const periodTo = new Date();
+  const appointmentPeriodTo = new Date(periodTo.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    salesReport,
+    reorderReport,
+    products,
+    scheduledAppointments,
+    completedAppointments,
+    cancelledAppointments,
+    pendingFollowUps,
+    cashOverview,
+    operational,
+    previousSnapshot,
+  ] = await Promise.all([
+    buildSalesReport(periodFrom, periodTo),
+    buildReorderReport(periodDays, 14),
+    prisma.product.findMany({
+      where: {
+        isActive: true,
+        kind: { in: inventoryKinds },
+        unit: { not: "servicio" },
+      },
+      select: {
+        id: true,
+        name: true,
+        stock: true,
+        minStock: true,
+        kind: true,
+      },
+    }),
+    prisma.appointment.count({
+      where: {
+        status: AppointmentStatus.SCHEDULED,
+        appointmentAt: { gte: periodTo, lte: appointmentPeriodTo },
+      },
+    }),
+    prisma.appointment.count({
+      where: {
+        status: AppointmentStatus.COMPLETED,
+        appointmentAt: { gte: periodFrom, lte: periodTo },
+      },
+    }),
+    prisma.appointment.count({
+      where: {
+        status: AppointmentStatus.CANCELLED,
+        appointmentAt: { gte: periodFrom, lte: periodTo },
+      },
+    }),
+    buildPendingFollowUps(50),
+    buildCashOverview(),
+    buildOperationalAlerts(20),
+    prisma.analysisSnapshot.findFirst({
+      where: { scope: "operations" },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const lowStockProducts = products.filter((product) => product.stock <= product.minStock).length;
+  const outOfStockProducts = products.filter((product) => product.stock === 0).length;
+  const medicalSupplyLowStock = products.filter(
+    (product) =>
+      product.kind === ProductKind.MEDICAL_SUPPLY &&
+      product.stock <= product.minStock,
+  ).length;
+  const criticalAlerts = operational.alerts.filter((alert) => alert.level === "critical").length;
+  const warningAlerts = operational.alerts.filter((alert) => alert.level === "warning").length;
+
+  const metrics: AnalysisMetrics = {
+    periodDays,
+    totalRevenue: salesReport.totalRevenue,
+    totalSales: salesReport.totalSales,
+    totalItemsSold: salesReport.totalItemsSold,
+    averageTicket: salesReport.averageTicket,
+    estimatedGrossProfit: salesReport.estimatedGrossProfit,
+    estimatedMarginPct: salesReport.estimatedMarginPct,
+    discountRatePct: salesReport.discountRatePct,
+    lowStockProducts,
+    outOfStockProducts,
+    medicalSupplyLowStock,
+    reorderItems: reorderReport.totalItems,
+    reorderUnitsSuggested: reorderReport.totalUnitsSuggested,
+    criticalAlerts,
+    warningAlerts,
+    scheduledAppointments7Days: scheduledAppointments,
+    completedAppointments,
+    cancelledAppointments,
+    pendingFollowUps: pendingFollowUps.length,
+    openCashExpectedAmount: cashOverview.openSession?.expectedAmount ?? 0,
+    lastCashDifference: cashOverview.lastClosedSession?.difference ?? 0,
+    cashOpen: Boolean(cashOverview.openSession),
+  };
+
+  const recommendations: AnalysisRecommendation[] = [];
+  if (reorderReport.totalItems > 0) {
+    recommendations.push({
+      area: "inventory",
+      priority: reorderReport.totalItems >= 10 ? "high" : "medium",
+      message: `Surtir ${reorderReport.totalUnitsSuggested} unidades en ${reorderReport.totalItems} productos; priorizar ${reorderReport.items[0]?.name ?? "productos criticos"}.`,
+    });
+  }
+  if (outOfStockProducts > 0) {
+    recommendations.push({
+      area: "inventory",
+      priority: "critical",
+      message: `${outOfStockProducts} productos estan agotados; atender antes de nuevas ventas.`,
+    });
+  }
+  if (salesReport.estimatedMarginPct < 20 && salesReport.totalRevenue > 0) {
+    recommendations.push({
+      area: "pricing",
+      priority: "high",
+      message: `Margen estimado ${salesReport.estimatedMarginPct.toFixed(2)}%; revisar precios y costos de productos lideres.`,
+    });
+  }
+  if (pendingFollowUps.length > 0) {
+    recommendations.push({
+      area: "appointments",
+      priority: pendingFollowUps.length >= 5 ? "high" : "medium",
+      message: `${pendingFollowUps.length} pacientes tienen seguimiento pendiente.`,
+    });
+  }
+  if (cashOverview.lastClosedSession && Math.abs(cashOverview.lastClosedSession.difference ?? 0) > 0.01) {
+    recommendations.push({
+      area: "cash",
+      priority: Math.abs(cashOverview.lastClosedSession.difference ?? 0) >= 100 ? "critical" : "high",
+      message: `Ultimo corte con diferencia de ${roundMoney(cashOverview.lastClosedSession.difference ?? 0)}.`,
+    });
+  }
+
+  const trendInsights = [
+    buildTrendInsight(
+      "Ingreso neto",
+      salesReport.totalRevenue,
+      metricNumber(previousSnapshot?.metrics, "totalRevenue"),
+      { unit: " pesos", higherIsGood: true },
+    ),
+    buildTrendInsight(
+      "Utilidad estimada",
+      salesReport.estimatedGrossProfit,
+      metricNumber(previousSnapshot?.metrics, "estimatedGrossProfit"),
+      { unit: " pesos", higherIsGood: true },
+    ),
+    buildTrendInsight(
+      "Productos en stock bajo",
+      lowStockProducts,
+      metricNumber(previousSnapshot?.metrics, "lowStockProducts"),
+      { higherIsGood: false },
+    ),
+    buildTrendInsight(
+      "Unidades sugeridas para surtir",
+      reorderReport.totalUnitsSuggested,
+      metricNumber(previousSnapshot?.metrics, "reorderUnitsSuggested"),
+      { higherIsGood: false },
+    ),
+  ].filter((item): item is string => Boolean(item));
+
+  const topByUnits = salesReport.bestSellingProducts[0];
+  const leastByUnits = salesReport.leastSellingProducts[0];
+  const localInsights = [
+    ...salesReport.highlights.slice(0, 3),
+    `Descuentos acumulados: $${salesReport.totalDiscount.toFixed(2)} (${salesReport.discountRatePct.toFixed(2)}% del bruto).`,
+    `Utilidad estimada: $${salesReport.estimatedGrossProfit.toFixed(2)} con margen estimado ${salesReport.estimatedMarginPct.toFixed(2)}%.`,
+    `Producto mas vendido por unidades: ${topByUnits ? `${topByUnits.productName} (${topByUnits.quantity})` : "sin datos"}.`,
+    `Producto de menor rotacion: ${leastByUnits ? `${leastByUnits.productName} (${leastByUnits.quantity})` : "sin datos"}.`,
+    `Inventario: ${lowStockProducts} productos en minimo o bajo, ${outOfStockProducts} agotados y ${medicalSupplyLowStock} materiales por atender.`,
+    `Surtido recomendado: ${reorderReport.totalUnitsSuggested} unidades en ${reorderReport.totalItems} productos.`,
+    `Citas: ${scheduledAppointments} proximas en 7 dias, ${completedAppointments} completadas y ${cancelledAppointments} canceladas en el periodo.`,
+    `Pacientes con seguimiento pendiente: ${pendingFollowUps.length}.`,
+    ...trendInsights,
+  ];
+
+  return {
+    periodFrom,
+    periodTo,
+    metrics,
+    recommendations,
+    localInsights,
+    summary: `Analisis operativo de ${periodDays} dias: ${salesReport.totalSales} ventas, ${lowStockProducts} alertas de stock y ${pendingFollowUps.length} seguimientos pendientes.`,
+    salesReport,
+  };
+}
+
+async function persistAnalysisSnapshot(input: {
+  scope: string;
+  source: "aion" | "local";
+  periodFrom: Date;
+  periodTo: Date;
+  summary: string;
+  insights: string[];
+  metrics: AnalysisMetrics;
+  recommendations: AnalysisRecommendation[];
+}) {
+  return prisma.analysisSnapshot.create({
+    data: {
+      scope: input.scope,
+      source: input.source,
+      periodFrom: input.periodFrom,
+      periodTo: input.periodTo,
+      summary: input.summary,
+      insights: input.insights,
+      metrics: input.metrics,
+      recommendations: input.recommendations,
+    },
+  });
 }
 
 async function searchPatients(query: string) {
@@ -4112,6 +4395,37 @@ app.get(
 );
 
 app.get(
+  "/api/analytics/analysis-history",
+  asyncHandler(async (req, res) => {
+    const parsedTake = Number.parseInt(String(req.query.take ?? "12"), 10);
+    const take = Number.isNaN(parsedTake) ? 12 : Math.min(80, Math.max(1, parsedTake));
+    const scope = typeof req.query.scope === "string" ? req.query.scope.trim() : "operations";
+
+    const snapshots = await prisma.analysisSnapshot.findMany({
+      where: { scope },
+      orderBy: { createdAt: "desc" },
+      take,
+    });
+
+    res.json({
+      count: snapshots.length,
+      snapshots: snapshots.map((snapshot) => ({
+        id: snapshot.id,
+        scope: snapshot.scope,
+        source: snapshot.source,
+        periodFrom: snapshot.periodFrom?.toISOString() ?? null,
+        periodTo: snapshot.periodTo?.toISOString() ?? null,
+        summary: snapshot.summary,
+        insights: snapshot.insights,
+        metrics: snapshot.metrics,
+        recommendations: snapshot.recommendations,
+        createdAt: snapshot.createdAt.toISOString(),
+      })),
+    });
+  }),
+);
+
+app.get(
   "/api/ai/price-adjustments",
   asyncHandler(async (req, res) => {
     const rawMarketShift = Number.parseFloat(String(req.query.marketShift ?? "0"));
@@ -4197,53 +4511,37 @@ app.post(
 app.get(
   "/api/ai/business-insights",
   asyncHandler(async (_req, res) => {
-    const [salesReport, inventoryAlerts, followUps] = await Promise.all([
-      buildSalesReport(daysAgo(30), new Date()),
-      prisma.product.findMany({
-        where: {
-          isActive: true,
-          kind: { in: inventoryKinds },
-          unit: { not: "servicio" },
-        },
-        select: { id: true, name: true, stock: true, minStock: true },
-      }),
-      buildPendingFollowUps(6),
-    ]);
-
-    const lowStock = inventoryAlerts.filter((item) => item.stock <= item.minStock).length;
+    const analysis = await buildOperationalAnalysisBase(30);
 
     const aiInsights = await requestAionBusinessInsights({
-      totalRevenue30Days: salesReport.totalRevenue,
-      totalSales30Days: salesReport.totalSales,
-      averageTicket30Days: salesReport.averageTicket,
-      lowStockProducts: lowStock,
-      topProducts: salesReport.topProducts,
+      totalRevenue30Days: analysis.salesReport.totalRevenue,
+      totalSales30Days: analysis.salesReport.totalSales,
+      averageTicket30Days: analysis.salesReport.averageTicket,
+      lowStockProducts: Number(analysis.metrics.lowStockProducts ?? 0),
+      topProducts: analysis.salesReport.topProducts,
     });
 
-    if (aiInsights && aiInsights.length > 0) {
-      res.json({
-        source: "aion",
-        insights: aiInsights,
-      });
-      return;
-    }
-
-    const topByUnits = salesReport.bestSellingProducts[0];
-    const leastByUnits = salesReport.leastSellingProducts[0];
-
-    const fallbackInsights = [
-      ...salesReport.highlights.slice(0, 3),
-      `Descuentos acumulados: $${salesReport.totalDiscount.toFixed(2)} (${salesReport.discountRatePct.toFixed(2)}% del bruto).`,
-      `Utilidad estimada: $${salesReport.estimatedGrossProfit.toFixed(2)} con margen estimado ${salesReport.estimatedMarginPct.toFixed(2)}%.`,
-      `Producto mas vendido por unidades: ${topByUnits ? `${topByUnits.productName} (${topByUnits.quantity})` : "sin datos"}.`,
-      `Producto de menor rotacion: ${leastByUnits ? `${leastByUnits.productName} (${leastByUnits.quantity})` : "sin datos"}.`,
-      `Pacientes con seguimiento pendiente: ${followUps.length}.`,
-      `Productos con alerta de inventario: ${lowStock}. Recomendacion: priorizar reposicion y campañas para productos de baja rotacion.`,
-    ];
+    const hasAionInsights = Boolean(aiInsights && aiInsights.length > 0);
+    const source = hasAionInsights ? "aion" : "local";
+    const insights = hasAionInsights ? aiInsights ?? [] : analysis.localInsights;
+    const snapshot = await persistAnalysisSnapshot({
+      scope: "operations",
+      source,
+      periodFrom: analysis.periodFrom,
+      periodTo: analysis.periodTo,
+      summary: analysis.summary,
+      insights,
+      metrics: analysis.metrics,
+      recommendations: analysis.recommendations,
+    });
 
     res.json({
-      source: "local",
-      insights: fallbackInsights,
+      source,
+      insights,
+      metrics: analysis.metrics,
+      recommendations: analysis.recommendations,
+      snapshotId: snapshot.id,
+      generatedAt: snapshot.createdAt.toISOString(),
     });
   }),
 );

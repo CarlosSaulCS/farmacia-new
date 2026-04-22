@@ -182,6 +182,23 @@ type AuditLogEntry = {
   createdAt: string;
 };
 
+type AnalysisSnapshot = {
+  id: number;
+  scope: string;
+  source: "aion" | "local" | string;
+  periodFrom?: string | null;
+  periodTo?: string | null;
+  summary: string;
+  insights: string[];
+  metrics: Record<string, number | string | boolean | null>;
+  recommendations?: Array<{
+    area: string;
+    priority: "critical" | "high" | "medium" | "low";
+    message: string;
+  }> | null;
+  createdAt: string;
+};
+
 type InventoryLot = {
   id: number;
   productId: number;
@@ -450,6 +467,11 @@ function salesBandLabel(band: ReorderItem["salesBand"]): string {
     return "Media";
   }
   return "Baja";
+}
+
+function analysisMetricNumber(snapshot: AnalysisSnapshot, key: string): number | null {
+  const value = snapshot.metrics[key];
+  return typeof value === "number" ? value : null;
 }
 
 function normalizeReorderReportParams(days: string, coverage: string) {
@@ -1063,6 +1085,7 @@ function App() {
 
   const [insights, setInsights] = useState<string[]>([]);
   const [insightSource, setInsightSource] = useState<"aion" | "local">("local");
+  const [analysisHistory, setAnalysisHistory] = useState<AnalysisSnapshot[]>([]);
   const [marketShift, setMarketShift] = useState(0);
   const [suggestions, setSuggestions] = useState<PriceSuggestion[]>([]);
   const [suggestionSource, setSuggestionSource] = useState<"aion" | "local">("local");
@@ -1255,6 +1278,12 @@ function App() {
       if (insightsResult.status === "fulfilled") {
         setInsights(insightsResult.value.insights);
         setInsightSource(insightsResult.value.source);
+        const historyData = await apiRequest<{ count: number; snapshots: AnalysisSnapshot[] }>(
+          "/analytics/analysis-history?take=8",
+        ).catch(() => null);
+        if (historyData) {
+          setAnalysisHistory(historyData.snapshots);
+        }
       }
       setPatients(patientsData);
       setConsultations(consultationsData);
@@ -2529,6 +2558,12 @@ function App() {
       if (aiInsightsResult[0].status === "fulfilled") {
         setInsights(aiInsightsResult[0].value.insights);
         setInsightSource(aiInsightsResult[0].value.source);
+        const historyData = await apiRequest<{ count: number; snapshots: AnalysisSnapshot[] }>(
+          "/analytics/analysis-history?take=8",
+        ).catch(() => null);
+        if (historyData) {
+          setAnalysisHistory(historyData.snapshots);
+        }
       }
       setLastReportsLoadedAt(new Date());
 
@@ -5425,6 +5460,44 @@ function App() {
                 ))}
                 {insights.length === 0 && <li>Sin analisis disponible.</li>}
               </ul>
+              <details className="compact-details">
+                <summary>Memoria de analisis</summary>
+                <div className="details-content">
+                  <div className="data-table-wrap medium">
+                    <table className="data-table">
+                      <thead>
+                        <tr>
+                          <th>Fecha</th>
+                          <th>Origen</th>
+                          <th>Resumen</th>
+                          <th>Ventas</th>
+                          <th>Stock bajo</th>
+                          <th>Surtir</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analysisHistory.map((snapshot) => (
+                          <tr key={snapshot.id}>
+                            <td>{datetimeFormatter.format(new Date(snapshot.createdAt))}</td>
+                            <td>{snapshot.source}</td>
+                            <td>{snapshot.summary}</td>
+                            <td>{analysisMetricNumber(snapshot, "totalSales") ?? 0}</td>
+                            <td>{analysisMetricNumber(snapshot, "lowStockProducts") ?? 0}</td>
+                            <td>{analysisMetricNumber(snapshot, "reorderUnitsSuggested") ?? 0}</td>
+                          </tr>
+                        ))}
+                        {analysisHistory.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="empty-cell">
+                              Aun no hay analisis historicos registrados.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </details>
             </article>
 
             <article className="surface">

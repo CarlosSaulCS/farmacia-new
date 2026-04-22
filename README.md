@@ -8,6 +8,7 @@ Sistema integral para farmacia con enfoque en:
 - Analitica de ventas y productividad
 - Reporteria y exportacion de base de datos
 - Integracion con IA AION para sugerencias operativas
+- Memoria local de analisis para aprender de historicos de ventas, inventario, citas, caja y material
 
 Diseñado para funcionar como software instalable local, sin requerir hosting o alojamiento de pago para operar.
 
@@ -141,6 +142,8 @@ Cada linea de venta conserva snapshot de SKU, nombre, nombre comercial, categori
 - IA AION
   - POST /api/ai/price-adjustments
   - GET /api/ai/business-insights
+- Memoria analitica
+  - GET /api/analytics/analysis-history
 
 - Base de datos
   - POST /api/database/export
@@ -181,3 +184,4 @@ Se genera instalador NSIS en:
 
 - Si AION_URL no esta configurado, el sistema usa logica local para sugerencias e insights.
 - Si AION_URL y AION_API_KEY estan configurados, las rutas IA consultan tu servicio externo.
+- Cada analisis operativo genera un snapshot local con periodo, metricas, insights y recomendaciones para comparar tendencias contra analisis anteriores.

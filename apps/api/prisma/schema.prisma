@@ -244,3 +244,19 @@ model AiSuggestion {
   payload        Json
   createdAt      DateTime @default(now())
 }
+
+model AnalysisSnapshot {
+  id              Int      @id @default(autoincrement())
+  scope           String
+  source          String   @default("local")
+  periodFrom      DateTime?
+  periodTo        DateTime?
+  summary         String
+  insights        Json
+  metrics         Json
+  recommendations Json?
+  createdAt       DateTime @default(now())
+
+  @@index([scope, createdAt])
+  @@index([periodFrom, periodTo])
+}
