@@ -3224,7 +3224,7 @@ function App() {
           </div>
 
           <div className="reports-mini-grid pos-cash-grid">
-            <article className="surface">
+            <article className="surface pos-cash-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Caja y corte</h3>
@@ -3376,7 +3376,7 @@ function App() {
           </div>
 
           <div className="pos-grid">
-            <article className="surface">
+            <article className="surface pos-catalog-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Catalogo</h3>
@@ -3421,7 +3421,7 @@ function App() {
               </div>
             </article>
 
-            <article className="surface ticket-panel">
+            <article className="surface ticket-panel pos-ticket-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Ticket actual</h3>
@@ -3590,7 +3590,7 @@ function App() {
           </div>
 
           <div className="inventory-grid">
-            <article className="surface">
+            <article className="surface inventory-entry-card">
               <h3>Nuevo producto</h3>
               <form className="field-grid" onSubmit={submitNewProduct}>
                 <div className="field-grid two-col">
@@ -3974,7 +3974,7 @@ function App() {
               </details>
             </article>
 
-            <article className="surface">
+            <article className="surface inventory-catalog-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Inventario</h3>
@@ -4283,7 +4283,7 @@ function App() {
           </div>
 
           <div className="inventory-grid">
-            <article className="surface">
+            <article className="surface service-entry-card">
               <h3>Nuevo Servicio</h3>
               <form className="field-grid" onSubmit={submitNewService}>
                 <div className="field-grid two-col">
@@ -4481,7 +4481,7 @@ function App() {
               </details>
             </article>
 
-            <article className="surface">
+            <article className="surface service-catalog-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Servicios</h3>
@@ -4547,7 +4547,7 @@ function App() {
           </div>
 
           <div className="reports-mini-grid alerts-grid">
-            <article className="surface">
+            <article className="surface alert-engine-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Motor de alertas</h3>
@@ -4591,7 +4591,7 @@ function App() {
               </div>
             </article>
 
-            <article className="surface">
+            <article className="surface alert-stock-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Stock critico</h3>
@@ -4649,7 +4649,7 @@ function App() {
               </div>
             </article>
 
-            <article className="surface">
+            <article className="surface alert-expiry-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Proximos a caducar</h3>
@@ -5150,7 +5150,7 @@ function App() {
             <p>Ventas, surtido y exportaciones desde el sistema local.</p>
           </div>
 
-          <article className="surface">
+          <article className="surface report-config-card">
             <div className="surface-head compact">
               <div>
                 <h3>Configuracion</h3>
