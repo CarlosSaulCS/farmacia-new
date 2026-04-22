@@ -2544,13 +2544,69 @@ function buildTrendInsight(
   return `${label} ${direction} ${roundPercent(Math.abs(deltaPct))}% vs el analisis anterior (${roundMoney(previous)}${unit} -> ${roundMoney(current)}${unit})${impact}.`;
 }
 
+function clampRatio(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function changeRatio(current: number, previous: number): number | null {
+  if (previous <= 0) {
+    return null;
+  }
+
+  return (current - previous) / previous;
+}
+
+function formatChangePct(value: number | null): string {
+  if (value === null) {
+    return "sin base previa";
+  }
+
+  const direction = value >= 0 ? "+" : "-";
+  return `${direction}${roundPercent(Math.abs(value))}%`;
+}
+
+function averageMetricFromSnapshots(
+  snapshots: Array<{ metrics: Prisma.JsonValue }>,
+  key: string,
+): number | null {
+  const values = snapshots
+    .map((snapshot) => metricNumber(snapshot.metrics, key))
+    .filter((value): value is number => typeof value === "number");
+
+  if (values.length === 0) {
+    return null;
+  }
+
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function projectNextMetric(
+  current: number,
+  previous: number,
+  historicalAverage: number | null,
+): number {
+  const periodTrend = changeRatio(current, previous) ?? 0;
+  const historicalTrend =
+    historicalAverage && historicalAverage > 0
+      ? (current - historicalAverage) / historicalAverage
+      : 0;
+  const blendedTrend = clampRatio(periodTrend * 0.65 + historicalTrend * 0.35, -0.35, 0.35);
+
+  return roundMoney(Math.max(0, current * (1 + blendedTrend * 0.5)));
+}
+
 async function buildOperationalAnalysisBase(periodDays = 30) {
   const periodFrom = daysAgo(periodDays);
   const periodTo = new Date();
+  const previousPeriodTo = new Date(periodFrom.getTime() - 1);
+  const previousPeriodFrom = new Date(
+    periodFrom.getTime() - periodDays * 24 * 60 * 60 * 1000,
+  );
   const appointmentPeriodTo = new Date(periodTo.getTime() + 7 * 24 * 60 * 60 * 1000);
 
   const [
     salesReport,
+    previousSalesReport,
     reorderReport,
     products,
     scheduledAppointments,
@@ -2559,9 +2615,10 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
     pendingFollowUps,
     cashOverview,
     operational,
-    previousSnapshot,
+    recentSnapshots,
   ] = await Promise.all([
     buildSalesReport(periodFrom, periodTo),
+    buildSalesReport(previousPeriodFrom, previousPeriodTo),
     buildReorderReport(periodDays, 14),
     prisma.product.findMany({
       where: {
@@ -2598,11 +2655,13 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
     buildPendingFollowUps(50),
     buildCashOverview(),
     buildOperationalAlerts(20),
-    prisma.analysisSnapshot.findFirst({
+    prisma.analysisSnapshot.findMany({
       where: { scope: "operations" },
       orderBy: { createdAt: "desc" },
+      take: 8,
     }),
   ]);
+  const previousSnapshot = recentSnapshots[0] ?? null;
 
   const lowStockProducts = products.filter((product) => product.stock <= product.minStock).length;
   const outOfStockProducts = products.filter((product) => product.stock === 0).length;
@@ -2613,15 +2672,73 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
   ).length;
   const criticalAlerts = operational.alerts.filter((alert) => alert.level === "critical").length;
   const warningAlerts = operational.alerts.filter((alert) => alert.level === "warning").length;
+  const revenueVsPreviousRatio = changeRatio(
+    salesReport.totalRevenue,
+    previousSalesReport.totalRevenue,
+  );
+  const salesVsPreviousRatio = changeRatio(salesReport.totalSales, previousSalesReport.totalSales);
+  const profitVsPreviousRatio = changeRatio(
+    salesReport.estimatedGrossProfit,
+    previousSalesReport.estimatedGrossProfit,
+  );
+  const historicalAverageRevenue = averageMetricFromSnapshots(recentSnapshots, "totalRevenue");
+  const historicalAverageSales = averageMetricFromSnapshots(recentSnapshots, "totalSales");
+  const historicalAverageLowStock = averageMetricFromSnapshots(recentSnapshots, "lowStockProducts");
+  const historicalAverageReorderUnits = averageMetricFromSnapshots(
+    recentSnapshots,
+    "reorderUnitsSuggested",
+  );
+  const projectedRevenueNextPeriod = projectNextMetric(
+    salesReport.totalRevenue,
+    previousSalesReport.totalRevenue,
+    historicalAverageRevenue,
+  );
+  const projectedSalesNextPeriod = Math.round(
+    projectNextMetric(
+      salesReport.totalSales,
+      previousSalesReport.totalSales,
+      historicalAverageSales,
+    ),
+  );
+  const projectedReorderUnitsNextPeriod = Math.round(
+    projectNextMetric(
+      reorderReport.totalUnitsSuggested,
+      metricNumber(previousSnapshot?.metrics, "reorderUnitsSuggested") ?? 0,
+      historicalAverageReorderUnits,
+    ),
+  );
+  const projectedLowStockNextPeriod = Math.round(
+    projectNextMetric(
+      lowStockProducts,
+      metricNumber(previousSnapshot?.metrics, "lowStockProducts") ?? 0,
+      historicalAverageLowStock,
+    ),
+  );
 
   const metrics: AnalysisMetrics = {
     periodDays,
+    previousPeriodDays: periodDays,
     totalRevenue: salesReport.totalRevenue,
+    previousPeriodRevenue: previousSalesReport.totalRevenue,
+    revenueVsPreviousPct:
+      revenueVsPreviousRatio === null ? null : roundPercent(revenueVsPreviousRatio),
     totalSales: salesReport.totalSales,
+    previousPeriodSales: previousSalesReport.totalSales,
+    salesVsPreviousPct:
+      salesVsPreviousRatio === null ? null : roundPercent(salesVsPreviousRatio),
     totalItemsSold: salesReport.totalItemsSold,
+    previousPeriodItemsSold: previousSalesReport.totalItemsSold,
     averageTicket: salesReport.averageTicket,
+    previousPeriodAverageTicket: previousSalesReport.averageTicket,
     estimatedGrossProfit: salesReport.estimatedGrossProfit,
+    previousPeriodEstimatedGrossProfit: previousSalesReport.estimatedGrossProfit,
+    profitVsPreviousPct:
+      profitVsPreviousRatio === null ? null : roundPercent(profitVsPreviousRatio),
     estimatedMarginPct: salesReport.estimatedMarginPct,
+    previousPeriodMarginPct: previousSalesReport.estimatedMarginPct,
+    marginVsPreviousPoints: roundMoney(
+      salesReport.estimatedMarginPct - previousSalesReport.estimatedMarginPct,
+    ),
     discountRatePct: salesReport.discountRatePct,
     lowStockProducts,
     outOfStockProducts,
@@ -2637,6 +2754,19 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
     openCashExpectedAmount: cashOverview.openSession?.expectedAmount ?? 0,
     lastCashDifference: cashOverview.lastClosedSession?.difference ?? 0,
     cashOpen: Boolean(cashOverview.openSession),
+    historicalSnapshotsUsed: recentSnapshots.length,
+    historicalAverageRevenue:
+      historicalAverageRevenue === null ? null : roundMoney(historicalAverageRevenue),
+    historicalAverageSales:
+      historicalAverageSales === null ? null : roundMoney(historicalAverageSales),
+    historicalAverageLowStock:
+      historicalAverageLowStock === null ? null : roundMoney(historicalAverageLowStock),
+    historicalAverageReorderUnits:
+      historicalAverageReorderUnits === null ? null : roundMoney(historicalAverageReorderUnits),
+    projectedRevenueNextPeriod,
+    projectedSalesNextPeriod,
+    projectedReorderUnitsNextPeriod,
+    projectedLowStockNextPeriod,
   };
 
   const recommendations: AnalysisRecommendation[] = [];
@@ -2675,6 +2805,27 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
       message: `Ultimo corte con diferencia de ${roundMoney(cashOverview.lastClosedSession.difference ?? 0)}.`,
     });
   }
+  if (revenueVsPreviousRatio !== null && revenueVsPreviousRatio <= -0.15) {
+    recommendations.push({
+      area: "sales",
+      priority: "high",
+      message: `Ingreso bajo ${roundPercent(Math.abs(revenueVsPreviousRatio))}% contra el periodo anterior; revisar productos lideres, horarios y ticket promedio.`,
+    });
+  }
+  if (profitVsPreviousRatio !== null && profitVsPreviousRatio <= -0.12) {
+    recommendations.push({
+      area: "pricing",
+      priority: "high",
+      message: `Utilidad estimada bajo ${roundPercent(Math.abs(profitVsPreviousRatio))}% vs periodo anterior; revisar costos, descuentos y precio sugerido.`,
+    });
+  }
+  if (projectedReorderUnitsNextPeriod > reorderReport.totalUnitsSuggested * 1.2) {
+    recommendations.push({
+      area: "inventory",
+      priority: "medium",
+      message: `La proyeccion apunta a ${projectedReorderUnitsNextPeriod} unidades por surtir si continua la tendencia; anticipar compra de alta rotacion.`,
+    });
+  }
 
   const trendInsights = [
     buildTrendInsight(
@@ -2706,6 +2857,11 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
   const topByUnits = salesReport.bestSellingProducts[0];
   const leastByUnits = salesReport.leastSellingProducts[0];
   const localInsights = [
+    `Comparativo contra periodo anterior: ingresos ${formatChangePct(revenueVsPreviousRatio)}, ventas ${formatChangePct(salesVsPreviousRatio)} y utilidad ${formatChangePct(profitVsPreviousRatio)}.`,
+    `Proyeccion siguiente periodo: ${projectedSalesNextPeriod} ventas, $${projectedRevenueNextPeriod.toFixed(2)} de ingreso y ${projectedReorderUnitsNextPeriod} unidades por surtir.`,
+    recentSnapshots.length > 0
+      ? `Memoria usada: ${recentSnapshots.length} analisis previos; ingreso promedio historico $${roundMoney(historicalAverageRevenue ?? 0).toFixed(2)} y stock bajo promedio ${roundMoney(historicalAverageLowStock ?? 0)}.`
+      : "Memoria usada: primer analisis historico; las predicciones se afinaran con nuevos cortes.",
     ...salesReport.highlights.slice(0, 3),
     `Descuentos acumulados: $${salesReport.totalDiscount.toFixed(2)} (${salesReport.discountRatePct.toFixed(2)}% del bruto).`,
     `Utilidad estimada: $${salesReport.estimatedGrossProfit.toFixed(2)} con margen estimado ${salesReport.estimatedMarginPct.toFixed(2)}%.`,
@@ -2724,7 +2880,7 @@ async function buildOperationalAnalysisBase(periodDays = 30) {
     metrics,
     recommendations,
     localInsights,
-    summary: `Analisis operativo de ${periodDays} dias: ${salesReport.totalSales} ventas, ${lowStockProducts} alertas de stock y ${pendingFollowUps.length} seguimientos pendientes.`,
+    summary: `Analisis operativo de ${periodDays} dias: ${salesReport.totalSales} ventas, ${lowStockProducts} alertas de stock, proyeccion ${projectedSalesNextPeriod} ventas y ${pendingFollowUps.length} seguimientos pendientes.`,
     salesReport,
   };
 }

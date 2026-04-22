@@ -5471,6 +5471,8 @@ function App() {
                           <th>Origen</th>
                           <th>Resumen</th>
                           <th>Ventas</th>
+                          <th>Prox.</th>
+                          <th>Ingreso proy.</th>
                           <th>Stock bajo</th>
                           <th>Surtir</th>
                         </tr>
@@ -5482,13 +5484,19 @@ function App() {
                             <td>{snapshot.source}</td>
                             <td>{snapshot.summary}</td>
                             <td>{analysisMetricNumber(snapshot, "totalSales") ?? 0}</td>
+                            <td>{analysisMetricNumber(snapshot, "projectedSalesNextPeriod") ?? 0}</td>
+                            <td>
+                              {moneyFormatter.format(
+                                analysisMetricNumber(snapshot, "projectedRevenueNextPeriod") ?? 0,
+                              )}
+                            </td>
                             <td>{analysisMetricNumber(snapshot, "lowStockProducts") ?? 0}</td>
                             <td>{analysisMetricNumber(snapshot, "reorderUnitsSuggested") ?? 0}</td>
                           </tr>
                         ))}
                         {analysisHistory.length === 0 && (
                           <tr>
-                            <td colSpan={6} className="empty-cell">
+                            <td colSpan={8} className="empty-cell">
                               Aun no hay analisis historicos registrados.
                             </td>
                           </tr>

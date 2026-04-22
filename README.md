@@ -185,3 +185,4 @@ Se genera instalador NSIS en:
 - Si AION_URL no esta configurado, el sistema usa logica local para sugerencias e insights.
 - Si AION_URL y AION_API_KEY estan configurados, las rutas IA consultan tu servicio externo.
 - Cada analisis operativo genera un snapshot local con periodo, metricas, insights y recomendaciones para comparar tendencias contra analisis anteriores.
+- El motor local compara el periodo actual contra el periodo anterior equivalente y contra la memoria de snapshots para proyectar ventas, ingreso, stock bajo y unidades por surtir.
