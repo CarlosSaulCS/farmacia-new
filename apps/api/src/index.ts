@@ -1740,6 +1740,40 @@ async function buildSalesReport(from: Date, to: Date) {
     },
   });
   const productById = new Map(productsForPeriod.map((product) => [product.id, product]));
+  const saleIds = sales.map((sale) => sale.id);
+  const saleCashMovements = saleIds.length > 0
+    ? await prisma.cashMovement.findMany({
+        where: {
+          type: CashMovementType.SALE,
+          saleId: { in: saleIds },
+        },
+        select: {
+          saleId: true,
+          sessionId: true,
+          amount: true,
+        },
+      })
+    : [];
+  const cashMovementBySaleId = new Map<
+    number,
+    {
+      amount: number;
+      sessionIds: Set<number>;
+    }
+  >();
+  for (const movement of saleCashMovements) {
+    if (!movement.saleId) {
+      continue;
+    }
+
+    const current = cashMovementBySaleId.get(movement.saleId) ?? {
+      amount: 0,
+      sessionIds: new Set<number>(),
+    };
+    current.amount += movement.amount;
+    current.sessionIds.add(movement.sessionId);
+    cashMovementBySaleId.set(movement.saleId, current);
+  }
 
   const totalSales = sales.length;
   const grossRevenue = roundMoney(sales.reduce((sum, sale) => sum + sale.subtotal, 0));
@@ -1821,6 +1855,7 @@ async function buildSalesReport(from: Date, to: Date) {
   const salesSummary = sales
     .map((sale) => {
       const itemCount = sale.items.reduce((sum, item) => sum + item.quantity, 0);
+      const cashMovement = cashMovementBySaleId.get(sale.id);
       return {
         saleId: sale.id,
         createdAt: sale.createdAt.toISOString(),
@@ -1828,11 +1863,38 @@ async function buildSalesReport(from: Date, to: Date) {
         subtotal: roundMoney(sale.subtotal),
         discount: roundMoney(sale.discount),
         total: roundMoney(sale.total),
+        amountPaid: roundMoney(sale.amountPaid ?? sale.total),
+        changeGiven: roundMoney(sale.changeGiven ?? 0),
+        cashLinked: Boolean(cashMovement),
+        cashSessionId: cashMovement ? [...cashMovement.sessionIds][0] ?? null : null,
         itemCount,
       };
     })
     .sort((a, b) => b.saleId - a.saleId)
     .slice(0, 40);
+
+  const unlinkedSales = sales.filter((sale) => !cashMovementBySaleId.has(sale.id));
+  const linkedSalesTotal = roundMoney(
+    sales
+      .filter((sale) => cashMovementBySaleId.has(sale.id))
+      .reduce((sum, sale) => sum + sale.total, 0),
+  );
+  const unlinkedSalesTotal = roundMoney(
+    unlinkedSales.reduce((sum, sale) => sum + sale.total, 0),
+  );
+  const cashMovementTotal = roundMoney(
+    [...cashMovementBySaleId.values()].reduce((sum, movement) => sum + movement.amount, 0),
+  );
+  const cashReconciliation = {
+    linkedSales: totalSales - unlinkedSales.length,
+    linkedSalesTotal,
+    unlinkedSales: unlinkedSales.length,
+    unlinkedSalesTotal,
+    cashMovementTotal,
+    hasDifferences:
+      unlinkedSales.length > 0 ||
+      Math.abs(cashMovementTotal - linkedSalesTotal) > 0.01,
+  };
 
   const performanceRows = [...productAccumulator.values()].map((entry) => {
     const averageUnitPrice = entry.quantity > 0 ? entry.revenue / entry.quantity : 0;
@@ -1988,6 +2050,8 @@ async function buildSalesReport(from: Date, to: Date) {
     highlights,
     productPerformance: performanceRows,
     salesSummary,
+    cashReconciliation,
+    cashLinkedSaleIds: [...cashMovementBySaleId.keys()],
     sales,
   };
 }
@@ -3194,6 +3258,13 @@ app.post(
 
     const createdSale = await prisma.$transaction(async (tx) => {
       const openSession = await getOpenCashSession(tx);
+      if (!openSession) {
+        throw new ApiError(
+          409,
+          "Abre caja antes de registrar ventas para mantener sincronizado el corte.",
+        );
+      }
+
       const products = await tx.product.findMany({
         where: {
           id: { in: productIds },
@@ -3283,14 +3354,12 @@ app.post(
         },
       });
 
-      if (openSession) {
-        await appendCashMovement(tx, openSession.id, {
-          type: CashMovementType.SALE,
-          amount: total,
-          reason: `Venta #${sale.id}`,
-          saleId: sale.id,
-        });
-      }
+      await appendCashMovement(tx, openSession.id, {
+        type: CashMovementType.SALE,
+        amount: total,
+        reason: `Venta #${sale.id}`,
+        saleId: sale.id,
+      });
 
       await writeAuditLog(tx, {
         entityType: "sale",
@@ -3300,7 +3369,7 @@ app.post(
         payload: {
           total,
           items: normalizedItems,
-          cashSessionId: openSession?.id ?? null,
+          cashSessionId: openSession.id,
         },
       });
 
@@ -3917,8 +3986,12 @@ app.get(
       "subtotal",
       "discount",
       "total",
+      "amountPaid",
+      "changeGiven",
+      "cashLinked",
     ];
 
+    const cashLinkedSaleIds = new Set(report.cashLinkedSaleIds);
     const csvLines = report.sales.map((sale) =>
       [
         csvEscape(sale.id),
@@ -3927,6 +4000,9 @@ app.get(
         csvEscape(sale.subtotal),
         csvEscape(sale.discount),
         csvEscape(sale.total),
+        csvEscape(sale.amountPaid),
+        csvEscape(sale.changeGiven),
+        csvEscape(cashLinkedSaleIds.has(sale.id) ? "yes" : "review"),
       ].join(","),
     );
 

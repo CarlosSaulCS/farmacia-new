@@ -279,6 +279,10 @@ type SalesTicketSummary = {
   subtotal: number;
   discount: number;
   total: number;
+  amountPaid: number;
+  changeGiven: number;
+  cashLinked: boolean;
+  cashSessionId: number | null;
   itemCount: number;
 };
 
@@ -315,6 +319,14 @@ type SalesReport = {
   unsoldProducts: SalesProductPerformance[];
   productPerformance: SalesProductPerformance[];
   salesSummary: SalesTicketSummary[];
+  cashReconciliation: {
+    linkedSales: number;
+    linkedSalesTotal: number;
+    unlinkedSales: number;
+    unlinkedSalesTotal: number;
+    cashMovementTotal: number;
+    hasDifferences: boolean;
+  };
 };
 
 type InventoryMovementReportItem = {
@@ -1580,6 +1592,13 @@ function App() {
     event.preventDefault();
     if (cart.length === 0) {
       setNotice({ kind: "error", message: "El ticket esta vacio." });
+      return;
+    }
+    if (!cashOverview.openSession) {
+      setNotice({
+        kind: "error",
+        message: "Abre caja antes de vender para que el ticket entre al corte.",
+      });
       return;
     }
     if (pendingAmount > 0) {
@@ -3214,13 +3233,18 @@ function App() {
                 <button
                   className="primary-btn"
                   type="submit"
-                  disabled={submittingSale || pendingAmount > 0 || cart.length === 0}
+                  disabled={
+                    submittingSale ||
+                    pendingAmount > 0 ||
+                    cart.length === 0 ||
+                    !cashOverview.openSession
+                  }
                 >
                   {submittingSale ? "Procesando venta..." : "Cobrar Y Registrar"}
                 </button>
                 {!cashOverview.openSession && (
                   <p className="muted-line compact-note">
-                    Puedes vender sin caja abierta, pero no se integrara al corte hasta abrir caja.
+                    Abre caja antes de cobrar para que la venta quede ligada al corte.
                   </p>
                 )}
               </form>
@@ -4957,6 +4981,29 @@ function App() {
                     </article>
                   </div>
 
+                  <div className="insight-inline-card">
+                    <strong>Reconciliacion con caja</strong>
+                    <p className="muted-line compact-note">
+                      {salesReport.cashReconciliation.linkedSales} de {salesReport.totalSales} tickets
+                      ligados a caja. Ventas en corte:{" "}
+                      <strong>
+                        {moneyFormatter.format(salesReport.cashReconciliation.cashMovementTotal)}
+                      </strong>
+                      .
+                    </p>
+                    {salesReport.cashReconciliation.hasDifferences ? (
+                      <p className="muted-line compact-note">
+                        Revisar: {salesReport.cashReconciliation.unlinkedSales} tickets por{" "}
+                        {moneyFormatter.format(salesReport.cashReconciliation.unlinkedSalesTotal)} no
+                        tienen movimiento de caja asociado.
+                      </p>
+                    ) : (
+                      <p className="muted-line compact-note">
+                        Ventas y movimientos de caja estan sincronizados para este periodo.
+                      </p>
+                    )}
+                  </div>
+
                   <h4 className="subsection-title">Productos Mas Vendidos Y Menos Vendidos</h4>
                   <div className="reports-mini-grid">
                     <div className="data-table-wrap tall">
@@ -5086,6 +5133,9 @@ function App() {
                               <th>Subtotal</th>
                               <th>Descuento</th>
                               <th>Total</th>
+                              <th>Pago</th>
+                              <th>Cambio</th>
+                              <th>Caja</th>
                               <th>Items</th>
                             </tr>
                           </thead>
@@ -5098,12 +5148,21 @@ function App() {
                                 <td>{moneyFormatter.format(sale.subtotal)}</td>
                                 <td>{moneyFormatter.format(sale.discount)}</td>
                                 <td>{moneyFormatter.format(sale.total)}</td>
+                                <td>{moneyFormatter.format(sale.amountPaid)}</td>
+                                <td>{moneyFormatter.format(sale.changeGiven)}</td>
+                                <td>
+                                  <span className={`status-chip ${sale.cashLinked ? "ok" : "high"}`}>
+                                    {sale.cashLinked
+                                      ? `Caja #${sale.cashSessionId ?? "-"}`
+                                      : "Revisar"}
+                                  </span>
+                                </td>
                                 <td>{sale.itemCount}</td>
                               </tr>
                             ))}
                             {salesReport.salesSummary.length === 0 && (
                               <tr>
-                                <td colSpan={7} className="empty-cell">
+                                <td colSpan={10} className="empty-cell">
                                   Sin tickets para el periodo seleccionado.
                                 </td>
                               </tr>
