@@ -2169,16 +2169,26 @@ async function buildReorderReport(days: number, coverageDays: number) {
     .map((product) => {
       const soldInPeriod = soldByProduct.get(product.id) ?? 0;
       const dailyVelocity = soldInPeriod / periodDays;
-      const safetyStock = Math.max(product.minStock, Math.ceil(dailyVelocity * 3));
       const minimumRestockTarget = calculateMinimumRestockTarget(
         product.stock,
         product.minStock,
       );
+      const minimumOrder = Math.max(0, minimumRestockTarget - product.stock);
+      const coverageDemand = Math.ceil(dailyVelocity * desiredCoverageDays);
+      const safetyStock = Math.ceil(dailyVelocity * 3);
+      const salesBasedTarget = Math.ceil(coverageDemand + safetyStock);
       const targetStock = Math.max(
         minimumRestockTarget,
-        Math.ceil(dailyVelocity * desiredCoverageDays + safetyStock),
+        salesBasedTarget,
       );
       const suggestedOrder = Math.max(0, targetStock - product.stock);
+      const rotationOrder = Math.max(0, suggestedOrder - minimumOrder);
+      const salesBand =
+        soldInPeriod === 0
+          ? "LOW"
+          : dailyVelocity >= 1
+            ? "HIGH"
+            : "MEDIUM";
 
       const reachedMinimumStock = product.stock <= product.minStock;
       if (!reachedMinimumStock) {
@@ -2203,8 +2213,18 @@ async function buildReorderReport(days: number, coverageDays: number) {
         minStock: product.minStock,
         targetStock,
         suggestedOrder,
+        minimumOrder,
+        rotationOrder,
+        salesCoverageUnits: coverageDemand,
         soldInPeriod,
         dailyVelocity: Number(dailyVelocity.toFixed(2)),
+        salesBand,
+        purchaseReason:
+          salesBand === "HIGH"
+            ? `Alta rotacion: ${soldInPeriod} unidades vendidas en ${periodDays} dias.`
+            : salesBand === "MEDIUM"
+              ? `Rotacion moderada: ${soldInPeriod} unidades vendidas en ${periodDays} dias.`
+              : "Sin ventas recientes: comprar solo lo necesario para superar el minimo.",
         priority,
         criticalityScore: roundMoney(
           suggestedOrder * 1.8 +

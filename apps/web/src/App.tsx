@@ -356,8 +356,13 @@ type ReorderItem = {
   minStock: number;
   targetStock: number;
   suggestedOrder: number;
+  minimumOrder: number;
+  rotationOrder: number;
+  salesCoverageUnits: number;
   soldInPeriod: number;
   dailyVelocity: number;
+  salesBand: "HIGH" | "MEDIUM" | "LOW";
+  purchaseReason: string;
   priority: ReorderPriority;
   criticalityScore: number;
 };
@@ -431,6 +436,16 @@ function reorderPriorityLabel(priority: ReorderPriority): string {
   return "Media";
 }
 
+function salesBandLabel(band: ReorderItem["salesBand"]): string {
+  if (band === "HIGH") {
+    return "Alta";
+  }
+  if (band === "MEDIUM") {
+    return "Media";
+  }
+  return "Baja";
+}
+
 function normalizeReorderReportParams(days: string, coverage: string) {
   return {
     daysValue: Math.max(1, Math.min(120, parseIntSafe(days, 30))),
@@ -463,7 +478,7 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
   doc.setFontSize(16);
   doc.text("Informe de surtido actualizado", 40, 40);
   doc.setFontSize(10);
-  doc.text("Medicamentos y material en stock minimo o por debajo, recalculados desde inventario local.", 40, 58);
+  doc.text("Medicamentos y material en stock minimo o por debajo; cantidad sugerida ajustada por ventas.", 40, 58);
   doc.text(`Generado: ${generatedAtText} | Datos recalculados al momento de exportar`, 40, 76);
   doc.text(`Rango analizado: ${rangeFromText} al ${rangeToText}`, 40, 92);
   doc.text(
@@ -505,11 +520,14 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
           String(item.minStock),
           String(item.targetStock),
           String(item.suggestedOrder),
+          String(item.minimumOrder),
+          String(item.rotationOrder),
           String(item.soldInPeriod),
           item.dailyVelocity.toFixed(2),
+          salesBandLabel(item.salesBand),
           reorderPriorityLabel(item.priority),
         ])
-      : [["-", "-", "Sin productos para surtir", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]];
+      : [["-", "-", "Sin productos para surtir", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]];
 
   autoTable(doc, {
     startY: 138,
@@ -524,8 +542,11 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
       "Min",
       "Objetivo",
       "Surtir",
+      "Base",
+      "+Ventas",
       "Vend.",
       "Vel/Dia",
+      "Rot.",
       "Prioridad",
     ]],
     body: bodyRows,
@@ -546,17 +567,20 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
     columnStyles: {
       0: { cellWidth: 22 },
       1: { cellWidth: 64 },
-      2: { cellWidth: 145 },
-      3: { cellWidth: 80 },
-      4: { cellWidth: 72 },
-      5: { cellWidth: 58 },
-      6: { cellWidth: 34, halign: "right" },
-      7: { cellWidth: 30, halign: "right" },
-      8: { cellWidth: 38, halign: "right" },
-      9: { cellWidth: 38, halign: "right", fontStyle: "bold" },
-      10: { cellWidth: 36, halign: "right" },
-      11: { cellWidth: 38, halign: "right" },
-      12: { cellWidth: 52 },
+      2: { cellWidth: 126 },
+      3: { cellWidth: 68 },
+      4: { cellWidth: 62 },
+      5: { cellWidth: 50 },
+      6: { cellWidth: 30, halign: "right" },
+      7: { cellWidth: 28, halign: "right" },
+      8: { cellWidth: 36, halign: "right" },
+      9: { cellWidth: 34, halign: "right", fontStyle: "bold" },
+      10: { cellWidth: 30, halign: "right" },
+      11: { cellWidth: 36, halign: "right" },
+      12: { cellWidth: 34, halign: "right" },
+      13: { cellWidth: 36, halign: "right" },
+      14: { cellWidth: 32 },
+      15: { cellWidth: 48 },
     },
     didDrawPage: ({ pageNumber }) => {
       doc.setFontSize(9);
@@ -955,6 +979,25 @@ function parseFloatSafe(value: string, fallback = 0): number {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function targetMarginForProductKind(kind: Product["kind"]): number {
+  return kind === "MEDICATION" ? 0.32 : 0.27;
+}
+
+function formatSuggestedPrice(value: number): string {
+  const rounded = value < 50 ? Math.ceil(value * 2) / 2 : Math.ceil(value);
+  return rounded.toFixed(2);
+}
+
+function suggestPublicPriceFromCost(costValue: string, kind: Product["kind"]): string {
+  const cost = parseFloatSafe(costValue, NaN);
+  if (Number.isNaN(cost) || cost <= 0) {
+    return "";
+  }
+
+  const targetMargin = targetMarginForProductKind(kind);
+  return formatSuggestedPrice(cost / Math.max(0.1, 1 - targetMargin));
+}
+
 function roundToPosAmount(value: number): number {
   return Math.floor(Math.max(0, value));
 }
@@ -1055,6 +1098,7 @@ function App() {
     description: "",
   });
   const [newProductSkuManuallyEdited, setNewProductSkuManuallyEdited] = useState(false);
+  const [newProductPriceManuallyEdited, setNewProductPriceManuallyEdited] = useState(false);
   const [newService, setNewService] = useState({
     sku: "",
     name: "",
@@ -1328,6 +1372,17 @@ function App() {
     const suggestedSku = generateSkuSuggestion(newProduct.name, newProduct.kind);
     setNewProduct((current) => ({ ...current, sku: suggestedSku }));
   }, [newProduct.kind, newProduct.name, newProductSkuManuallyEdited]);
+
+  useEffect(() => {
+    if (newProductPriceManuallyEdited) {
+      return;
+    }
+
+    const suggestedPrice = suggestPublicPriceFromCost(newProduct.cost, newProduct.kind);
+    setNewProduct((current) =>
+      current.price === suggestedPrice ? current : { ...current, price: suggestedPrice },
+    );
+  }, [newProduct.cost, newProduct.kind, newProductPriceManuallyEdited]);
 
   useEffect(() => {
     if (newServiceSkuManuallyEdited) {
@@ -1735,6 +1790,7 @@ function App() {
         description: "",
       });
       setNewProductSkuManuallyEdited(false);
+      setNewProductPriceManuallyEdited(false);
       setNotice({ kind: "success", message: "Producto creado exitosamente." });
       await refreshCoreData();
     } catch (error) {
@@ -3418,29 +3474,35 @@ function App() {
                       min={0}
                       step="0.01"
                       value={newProduct.cost}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const nextCost = event.target.value;
                         setNewProduct((current) => ({
                           ...current,
-                          cost: event.target.value,
-                        }))
-                      }
+                          cost: nextCost,
+                        }));
+                      }}
                     />
                   </div>
                   <div className="field-group">
-                    <label htmlFor="new-price">Precio Al Publico</label>
+                    <label htmlFor="new-price">Precio al publico sugerido</label>
                     <input
                       id="new-price"
                       type="number"
                       min={0}
                       step="0.01"
                       value={newProduct.price}
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        const nextPrice = event.target.value;
+                        setNewProductPriceManuallyEdited(nextPrice.trim().length > 0);
                         setNewProduct((current) => ({
                           ...current,
-                          price: event.target.value,
-                        }))
-                      }
+                          price: nextPrice,
+                        }));
+                      }}
                     />
+                    <p className="muted-line compact-note">
+                      Se calcula automaticamente desde el costo con margen objetivo; puedes ajustarlo manualmente.
+                    </p>
                   </div>
                 </div>
 
@@ -3798,11 +3860,29 @@ function App() {
                         min={0}
                         step="0.01"
                         value={editCost}
-                        onChange={(event) => setEditCost(event.target.value)}
+                        onChange={(event) => {
+                          const nextCost = event.target.value;
+                          const selectedKind = selectedEditProduct?.kind ?? "MEDICATION";
+                          const currentSuggestedPrice = suggestPublicPriceFromCost(editCost, selectedKind);
+                          const nextSuggestedPrice = suggestPublicPriceFromCost(nextCost, selectedKind);
+                          const currentPrice = parseFloatSafe(editPrice, NaN);
+                          const nextCostValue = parseFloatSafe(nextCost, NaN);
+                          const shouldSuggestPrice =
+                            !editPrice.trim() ||
+                            editPrice === currentSuggestedPrice ||
+                            (!Number.isNaN(currentPrice) &&
+                              !Number.isNaN(nextCostValue) &&
+                              currentPrice < nextCostValue);
+
+                          setEditCost(nextCost);
+                          if (shouldSuggestPrice && nextSuggestedPrice) {
+                            setEditPrice(nextSuggestedPrice);
+                          }
+                        }}
                       />
                     </div>
                     <div className="field-group">
-                      <label htmlFor="edit-price">Precio Al Publico</label>
+                      <label htmlFor="edit-price">Precio al publico</label>
                       <input
                         id="edit-price"
                         type="number"
@@ -3811,6 +3891,9 @@ function App() {
                         value={editPrice}
                         onChange={(event) => setEditPrice(event.target.value)}
                       />
+                      <p className="muted-line compact-note">
+                        Si el precio venia sugerido o queda debajo del costo, se recalcula al cambiar el costo.
+                      </p>
                     </div>
                   </div>
                   <div className="field-group">
@@ -5254,6 +5337,9 @@ function App() {
                     {reorderReport.totalItems} productos estan en stock minimo o por debajo. Unidades sugeridas:
                     <strong> {reorderReport.totalUnitsSuggested}</strong>
                   </p>
+                  <p className="muted-line compact-note">
+                    Sugerido = base para superar el minimo + extra por ventas del periodo. Alta rotacion compra mas; baja rotacion compra solo lo necesario.
+                  </p>
                   <div className="data-table-wrap tall">
                     <table className="data-table">
                       <thead>
@@ -5264,7 +5350,10 @@ function App() {
                           <th>Stock</th>
                           <th>Objetivo</th>
                           <th>Sugerido</th>
+                          <th>Base min.</th>
+                          <th>Extra ventas</th>
                           <th>Vendido</th>
+                          <th>Rotacion</th>
                           <th>Puntaje</th>
                           <th>Prioridad</th>
                         </tr>
@@ -5281,7 +5370,13 @@ function App() {
                             <td>{item.stock}</td>
                             <td>{item.targetStock}</td>
                             <td>{item.suggestedOrder}</td>
+                            <td>{item.minimumOrder}</td>
+                            <td>{item.rotationOrder}</td>
                             <td>{item.soldInPeriod}</td>
+                            <td>
+                              {salesBandLabel(item.salesBand)}
+                              <small>{item.purchaseReason}</small>
+                            </td>
                             <td>{item.criticalityScore.toFixed(1)}</td>
                             <td>
                               <span className={`status-chip ${item.priority.toLowerCase()}`}>
@@ -5292,7 +5387,7 @@ function App() {
                         ))}
                         {reorderReport.items.length === 0 && (
                           <tr>
-                            <td colSpan={9} className="empty-cell">
+                            <td colSpan={12} className="empty-cell">
                               No hay medicamentos ni material en stock minimo en este momento.
                             </td>
                           </tr>
