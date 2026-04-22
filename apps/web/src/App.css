@@ -358,6 +358,11 @@
   grid-template-columns: 248px minmax(0, 1fr);
   gap: 14px;
   align-items: start;
+  transition: grid-template-columns 0.22s ease;
+}
+
+.workspace-layout.sidebar-collapsed {
+  grid-template-columns: 76px minmax(0, 1fr);
 }
 
 .module-sidebar {
@@ -371,12 +376,25 @@
   border: 1px solid var(--line);
   background: linear-gradient(180deg, #ffffff, #f8fbfd);
   box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transition:
+    padding 0.22s ease,
+    border-radius 0.22s ease,
+    transform 0.22s ease;
+}
+
+.sidebar-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .sidebar-header {
   display: flex;
   flex-direction: column;
   gap: 5px;
+  min-width: 0;
 }
 
 .sidebar-header p,
@@ -405,6 +423,30 @@
   line-height: 1.45;
 }
 
+.sidebar-toggle {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(17, 130, 154, 0.18);
+  border-radius: 12px;
+  background: #ffffff;
+  color: var(--accent-strong);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 900;
+  box-shadow: var(--shadow-sm);
+  flex-shrink: 0;
+  transition:
+    transform 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.sidebar-toggle:hover {
+  border-color: rgba(17, 130, 154, 0.34);
+  background: #eef8fb;
+  transform: translateX(-1px);
+}
+
 .module-nav {
   display: flex;
   flex-direction: column;
@@ -418,12 +460,31 @@
   border-radius: 14px;
   padding: 11px 12px;
   text-align: left;
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
 }
 
-.module-button span {
+.module-label {
   font-size: 0.93rem;
   font-weight: 800;
+  white-space: nowrap;
+}
+
+.module-short {
+  display: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 130, 154, 0.1);
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  flex-shrink: 0;
 }
 
 .module-button:hover {
@@ -439,6 +500,40 @@
 
 .module-button.active span {
   color: var(--accent-strong);
+}
+
+.module-sidebar.collapsed {
+  padding: 10px;
+}
+
+.module-sidebar.collapsed .sidebar-topline {
+  justify-content: center;
+}
+
+.module-sidebar.collapsed .sidebar-header {
+  display: none;
+}
+
+.module-sidebar.collapsed .sidebar-toggle {
+  width: 48px;
+}
+
+.module-sidebar.collapsed .module-nav {
+  align-items: center;
+}
+
+.module-sidebar.collapsed .module-button {
+  width: 52px;
+  justify-content: center;
+  padding: 8px;
+}
+
+.module-sidebar.collapsed .module-label {
+  display: none;
+}
+
+.module-sidebar.collapsed .module-short {
+  display: inline-flex;
 }
 
 .sidebar-card {
@@ -547,7 +642,7 @@
 }
 
 .dashboard-kpi-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .kpi-card {
@@ -694,6 +789,59 @@
   grid-row: span 2;
 }
 
+.dashboard-command-grid {
+  display: grid;
+  grid-template-columns: minmax(460px, 1.15fr) minmax(420px, 0.85fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.dashboard-insights-card,
+.dashboard-assistant-card {
+  min-height: 100%;
+}
+
+.dashboard-insight-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dashboard-insight-list li {
+  min-height: 84px;
+}
+
+.dashboard-insights-card .muted-line {
+  color: var(--text-soft);
+}
+
+.dashboard-assistant-card {
+  background:
+    radial-gradient(circle at top right, rgba(45, 155, 99, 0.1), transparent 32%),
+    linear-gradient(180deg, #ffffff, #fbfcfe);
+}
+
+.dashboard-chip-row {
+  align-content: flex-start;
+}
+
+.dashboard-secondary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dashboard-status-card {
+  min-height: 174px;
+}
+
+.dashboard-price-details {
+  background: linear-gradient(180deg, #ffffff, #f8fbfd);
+}
+
+.price-details-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+}
+
 .pos-grid,
 .inventory-grid,
 .appointments-grid {
@@ -818,6 +966,15 @@
 .surface-spotlight .appointment-list small,
 .surface-spotlight .muted-line {
   color: #9fb8ca;
+}
+
+.insight-list.dashboard-insight-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.dashboard-insights-card .muted-line {
+  color: var(--text-soft);
 }
 
 .compact-list {
@@ -1299,6 +1456,12 @@
   gap: 10px;
 }
 
+.details-content.price-details-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+}
+
 .assistant-panel,
 .assistant-response,
 .insight-inline-card {
@@ -1388,6 +1551,18 @@
 }
 
 @media (max-width: 1480px) {
+  .dashboard-kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-command-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-secondary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .dashboard-primary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1420,9 +1595,47 @@
     grid-template-columns: 1fr;
   }
 
+  .workspace-layout.sidebar-collapsed {
+    grid-template-columns: 1fr;
+  }
+
   .module-sidebar,
   .ticket-panel {
     position: static;
+  }
+
+  .module-sidebar.collapsed {
+    padding: 14px;
+  }
+
+  .module-sidebar.collapsed .sidebar-topline {
+    justify-content: space-between;
+  }
+
+  .module-sidebar.collapsed .sidebar-header {
+    display: flex;
+  }
+
+  .module-sidebar.collapsed .module-nav {
+    align-items: stretch;
+  }
+
+  .module-sidebar.collapsed .module-button {
+    width: auto;
+    justify-content: flex-start;
+    padding: 11px 12px;
+  }
+
+  .module-sidebar.collapsed .module-label {
+    display: inline;
+  }
+
+  .module-sidebar.collapsed .module-short {
+    display: none;
+  }
+
+  .sidebar-toggle {
+    display: none;
   }
 
   .module-nav {
@@ -1441,6 +1654,10 @@
 
   .reports-grid > :first-child {
     grid-row: span 1;
+  }
+
+  .details-content.price-details-grid {
+    grid-template-columns: 1fr;
   }
 
   .report-config-form {
@@ -1474,6 +1691,8 @@
   }
 
   .dashboard-kpi-grid,
+  .insight-list.dashboard-insight-list,
+  .dashboard-secondary-grid,
   .module-kpi-grid,
   .field-grid.two-col,
   .report-filter-grid,

@@ -649,41 +649,49 @@ async function exportRestockReportPdf(report: ReorderReport): Promise<void> {
 const moduleOptions: Array<{
   key: ModuleKey;
   label: string;
+  shortLabel: string;
   description: string;
 }> = [
   {
     key: "dashboard",
     label: "Centro",
+    shortLabel: "CE",
     description: "Estado operativo, ventas y lectura inteligente.",
   },
   {
     key: "pos",
     label: "Punto De Venta",
+    shortLabel: "PV",
     description: "Cobro rapido con ticket, cambio y servicios.",
   },
   {
     key: "inventory",
     label: "Inventario",
+    shortLabel: "IN",
     description: "Altas, ajustes y control de surtido con caducidad.",
   },
   {
     key: "services",
     label: "Servicios",
+    shortLabel: "SV",
     description: "Servicios usados en POS y agenda clinica.",
   },
   {
     key: "alerts",
     label: "Alertas",
+    shortLabel: "AL",
     description: "Faltantes y proximos vencimientos en un solo lugar.",
   },
   {
     key: "appointments",
     label: "Citas",
+    shortLabel: "CI",
     description: "Programacion, seguimiento y cambio de estados.",
   },
   {
     key: "reports",
     label: "Reportes",
+    shortLabel: "RP",
     description: "Ventas, surtido, exportaciones y respaldo local.",
   },
 ];
@@ -1088,6 +1096,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 
 function App() {
   const [activeModule, setActiveModule] = useState<ModuleKey>("dashboard");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [loadingData, setLoadingData] = useState(true);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
@@ -2961,11 +2970,22 @@ function App() {
         </div>
       )}
 
-      <div className="workspace-layout">
-        <aside className="module-sidebar">
-          <div className="sidebar-header">
-            <p>Modulos</p>
-            <h2>Navegacion</h2>
+      <div className={`workspace-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+        <aside className={`module-sidebar ${sidebarCollapsed ? "collapsed" : ""}`}>
+          <div className="sidebar-topline">
+            <div className="sidebar-header">
+              <p>Modulos</p>
+              <h2>Navegacion</h2>
+            </div>
+            <button
+              type="button"
+              className="sidebar-toggle"
+              onClick={() => setSidebarCollapsed((current) => !current)}
+              aria-label={sidebarCollapsed ? "Mostrar menu de modulos" : "Ocultar menu de modulos"}
+              title={sidebarCollapsed ? "Mostrar menu" : "Ocultar menu"}
+            >
+              {sidebarCollapsed ? ">" : "<"}
+            </button>
           </div>
           <nav className="module-nav" aria-label="Navegacion de modulos">
             {moduleOptions.map((module) => (
@@ -2978,7 +2998,8 @@ function App() {
                   startTransition(() => setActiveModule(module.key));
                 }}
               >
-                <span>{module.label}</span>
+                <span className="module-short" aria-hidden="true">{module.shortLabel}</span>
+                <span className="module-label">{module.label}</span>
               </button>
             ))}
           </nav>
@@ -2995,138 +3016,90 @@ function App() {
 
           <MetricTiles items={dashboardKpis} className="module-kpi-grid dashboard-kpi-grid" />
 
-          <div className="dashboard-grid dashboard-primary-grid">
-            <article className="surface surface-spotlight">
+          <div className="dashboard-command-grid">
+            <article className="surface surface-spotlight dashboard-insights-card">
               <div className="surface-head">
                 <div>
                   <h3>Lectura del negocio</h3>
+                  <p className="muted-line">Analisis local e historico resumido para decidir rapido.</p>
                 </div>
                 <span className={`status-pill ${insightSource === "aion" ? "accent" : "success"}`}>
                   {insightSource === "aion" ? "AION" : "LOCAL"}
                 </span>
               </div>
 
-              <ul className="insight-list spotlight-list">
+              <ul className="insight-list spotlight-list dashboard-insight-list">
                 {insights.slice(0, 4).map((insight) => (
                   <li key={insight}>{insight}</li>
                 ))}
                 {insights.length === 0 && <li>Sin analisis disponible.</li>}
               </ul>
-
-              <div className="assistant-panel">
-                <div className="surface-head compact">
-                  <div>
-                    <h3>Asistente interno</h3>
-                  </div>
-                  <span className="status-pill neutral">LOCAL</span>
-                </div>
-                <div className="assistant-input-row">
-                  <input
-                    value={assistantQuery}
-                    onChange={(event) => setAssistantQuery(event.target.value)}
-                    placeholder="Pregunta algo como: que debo surtir hoy"
-                  />
-                  <button
-                    type="button"
-                    className="primary-btn"
-                    onClick={() => {
-                      void runAssistant();
-                    }}
-                    disabled={runningAssistant}
-                  >
-                    {runningAssistant ? "Consultando..." : "Consultar"}
-                  </button>
-                </div>
-                <div className="quick-chip-row">
-                  {[
-                    "¿Qué productos debo surtir hoy?",
-                    "¿Cuáles fueron los más vendidos de la semana?",
-                    "Muéstrame pacientes con seguimiento pendiente.",
-                    "Resume las ventas del día.",
-                  ].map((query) => (
-                    <button
-                      key={query}
-                      type="button"
-                      className="ghost-chip"
-                      onClick={() => {
-                        void runAssistant(query);
-                      }}
-                    >
-                      {query}
-                    </button>
-                  ))}
-                </div>
-                {assistantResponse && (
-                  <div className="assistant-response">
-                    <strong>{assistantResponse.title}</strong>
-                    <p>{assistantResponse.summary}</p>
-                    <ul className="compact-bullet-list">
-                      {assistantResponse.bullets.map((item) => (
-                        <li key={item}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-
-              <details className="compact-details">
-                <summary>Sugerencias de precio</summary>
-                <div className="details-content">
-                  <div className="control-panel">
-                    <p className="muted-line">
-                      Ajuste de mercado actual: <strong>{Math.round(marketShift * 100)}%</strong>
-                    </p>
-                    <div className="range-box">
-                      <label htmlFor="market-shift">Variacion esperada del mercado</label>
-                      <input
-                        id="market-shift"
-                        type="range"
-                        min={-0.15}
-                        max={0.2}
-                        step={0.01}
-                        value={marketShift}
-                        onChange={(event) => setMarketShift(Number(event.target.value))}
-                      />
-                      <button type="button" onClick={() => void calculatePriceSuggestions()}>
-                        {loadingSuggestions ? "Calculando..." : "Calcular"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="suggestion-panel">
-                    <div className="surface-head compact">
-                      <div>
-                        <h3>Sugerencias de margen</h3>
-                      </div>
-                      <span
-                        className={`status-pill ${
-                          suggestionSource === "aion" ? "accent" : "success"
-                        }`}
-                      >
-                        {suggestionSource === "aion" ? "AION" : "LOCAL"}
-                      </span>
-                    </div>
-                    <ul className="suggestion-list compact-list">
-                      {suggestions.slice(0, 4).map((item) => (
-                        <li key={`${item.productId}-${item.suggestedPrice}`}>
-                          <div>
-                            <strong>{item.productName ?? `Producto #${item.productId}`}</strong>
-                            <small>{item.reason}</small>
-                          </div>
-                          <span>{moneyFormatter.format(item.suggestedPrice)}</span>
-                        </li>
-                      ))}
-                      {suggestions.length === 0 && <li>Sin sugerencias aun.</li>}
-                    </ul>
-                  </div>
-                </div>
-              </details>
             </article>
 
-            <article className="surface">
+            <article className="surface dashboard-assistant-card">
+              <div className="surface-head compact">
+                <div>
+                  <h3>Asistente interno</h3>
+                  <p className="muted-line">Consultas rapidas sobre surtido, ventas y pacientes.</p>
+                </div>
+                <span className="status-pill neutral">LOCAL</span>
+              </div>
+              <div className="assistant-input-row">
+                <input
+                  value={assistantQuery}
+                  onChange={(event) => setAssistantQuery(event.target.value)}
+                  placeholder="Pregunta algo como: que debo surtir hoy"
+                />
+                <button
+                  type="button"
+                  className="primary-btn"
+                  onClick={() => {
+                    void runAssistant();
+                  }}
+                  disabled={runningAssistant}
+                >
+                  {runningAssistant ? "Consultando..." : "Consultar"}
+                </button>
+              </div>
+              <div className="quick-chip-row dashboard-chip-row">
+                {[
+                  "¿Qué productos debo surtir hoy?",
+                  "¿Cuáles fueron los más vendidos de la semana?",
+                  "Muéstrame pacientes con seguimiento pendiente.",
+                  "Resume las ventas del día.",
+                ].map((query) => (
+                  <button
+                    key={query}
+                    type="button"
+                    className="ghost-chip"
+                    onClick={() => {
+                      void runAssistant(query);
+                    }}
+                  >
+                    {query}
+                  </button>
+                ))}
+              </div>
+              {assistantResponse && (
+                <div className="assistant-response">
+                  <strong>{assistantResponse.title}</strong>
+                  <p>{assistantResponse.summary}</p>
+                  <ul className="compact-bullet-list">
+                    {assistantResponse.bullets.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </article>
+          </div>
+
+          <div className="dashboard-grid dashboard-secondary-grid">
+            <article className="surface dashboard-status-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Alertas operativas</h3>
+                  <p className="muted-line">Prioridades activas del sistema.</p>
                 </div>
               </div>
               <ul className="appointment-list compact-list">
@@ -3143,10 +3116,11 @@ function App() {
               </ul>
             </article>
 
-            <article className="surface">
+            <article className="surface dashboard-status-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Proximas citas</h3>
+                  <p className="muted-line">Agenda inmediata y consultas cercanas.</p>
                 </div>
               </div>
               <ul className="appointment-list compact-list">
@@ -3165,10 +3139,11 @@ function App() {
               </ul>
             </article>
 
-            <article className="surface">
+            <article className="surface dashboard-status-card">
               <div className="surface-head compact">
                 <div>
                   <h3>Seguimientos pendientes</h3>
+                  <p className="muted-line">Pacientes que requieren revision.</p>
                 </div>
               </div>
               <ul className="appointment-list compact-list">
@@ -3185,6 +3160,59 @@ function App() {
               </ul>
             </article>
           </div>
+
+          <details className="compact-details dashboard-price-details">
+            <summary>Sugerencias de precio</summary>
+            <div className="details-content price-details-grid">
+              <div className="control-panel">
+                <p className="muted-line">
+                  Ajuste de mercado actual: <strong>{Math.round(marketShift * 100)}%</strong>
+                </p>
+                <div className="range-box">
+                  <label htmlFor="market-shift">Variacion esperada del mercado</label>
+                  <input
+                    id="market-shift"
+                    type="range"
+                    min={-0.15}
+                    max={0.2}
+                    step={0.01}
+                    value={marketShift}
+                    onChange={(event) => setMarketShift(Number(event.target.value))}
+                  />
+                  <button type="button" onClick={() => void calculatePriceSuggestions()}>
+                    {loadingSuggestions ? "Calculando..." : "Calcular"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="suggestion-panel">
+              <div className="surface-head compact">
+                <div>
+                    <h3>Sugerencias de margen</h3>
+                </div>
+                  <span
+                    className={`status-pill ${
+                      suggestionSource === "aion" ? "accent" : "success"
+                    }`}
+                  >
+                    {suggestionSource === "aion" ? "AION" : "LOCAL"}
+                  </span>
+              </div>
+                <ul className="suggestion-list compact-list">
+                  {suggestions.slice(0, 4).map((item) => (
+                    <li key={`${item.productId}-${item.suggestedPrice}`}>
+                    <div>
+                        <strong>{item.productName ?? `Producto #${item.productId}`}</strong>
+                        <small>{item.reason}</small>
+                    </div>
+                      <span>{moneyFormatter.format(item.suggestedPrice)}</span>
+                  </li>
+                  ))}
+                  {suggestions.length === 0 && <li>Sin sugerencias aun.</li>}
+                </ul>
+              </div>
+            </div>
+          </details>
         </section>
       )}
 
