@@ -1005,6 +1005,31 @@ async function syncProductFromLots(tx: PrismaTx, productId: number) {
   });
 }
 
+async function reconcileInventorySnapshot() {
+  const products = await prisma.product.findMany({
+    where: {
+      isActive: true,
+      kind: { in: inventoryKinds },
+      unit: { not: "servicio" },
+    },
+    select: {
+      id: true,
+      sku: true,
+      kind: true,
+      stock: true,
+      cost: true,
+      expiresAt: true,
+    },
+  });
+
+  for (const product of products) {
+    await prisma.$transaction(async (tx) => {
+      await ensureFallbackLotForProduct(tx, product);
+      await syncProductFromLots(tx, product.id);
+    });
+  }
+}
+
 async function increaseInventoryLot(
   tx: PrismaTx,
   product: {
@@ -2104,6 +2129,7 @@ async function buildReorderReport(days: number, coverageDays: number) {
   const desiredCoverageDays = Math.max(1, coverageDays);
   const from = daysAgo(periodDays);
   const to = new Date();
+  await reconcileInventorySnapshot();
 
   const [products, sales] = await Promise.all([
     prisma.product.findMany({
@@ -2566,6 +2592,10 @@ app.get(
       ? (rawKind as ProductKindCode)
       : null;
 
+    if (!kindFilter || inventoryKinds.includes(kindFilter)) {
+      await reconcileInventorySnapshot();
+    }
+
     const products = await prisma.product.findMany({
       where: {
         kind: kindFilter ? kindFilter : { in: inventoryKinds },
@@ -2604,6 +2634,10 @@ app.get(
       return;
     }
 
+    if (!kindFilter || inventoryKinds.includes(kindFilter)) {
+      await reconcileInventorySnapshot();
+    }
+
     const products = await prisma.product.findMany({
       where: {
         kind:
@@ -2638,6 +2672,7 @@ app.get(
   asyncHandler(async (req, res) => {
     const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const intent = inferSearchIntent(query);
+    await reconcileInventorySnapshot();
 
     const items = await prisma.product.findMany({
       where: { isActive: true },
@@ -3143,6 +3178,8 @@ app.patch(
 app.get(
   "/api/inventory/alerts",
   asyncHandler(async (_req, res) => {
+    await reconcileInventorySnapshot();
+
     const [products, operational] = await Promise.all([
       prisma.product.findMany({
         where: {
@@ -3844,6 +3881,7 @@ app.post(
 app.get(
   "/api/operations/alerts",
   asyncHandler(async (_req, res) => {
+    await reconcileInventorySnapshot();
     res.json(await buildOperationalAlerts());
   }),
 );
@@ -3876,6 +3914,8 @@ app.post(
 app.get(
   "/api/analytics/dashboard",
   asyncHandler(async (_req, res) => {
+    await reconcileInventorySnapshot();
+
     const startOfToday = new Date();
     startOfToday.setHours(0, 0, 0, 0);
 

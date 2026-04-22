@@ -1161,13 +1161,10 @@ function App() {
         posCatalog,
         inventoryAlerts,
         appointmentData,
-        aiInsights,
         patientsData,
         consultationsData,
         lotsData,
-        operationsData,
         cashData,
-        priceData,
       ] = await Promise.all([
         apiRequest<DashboardSummary>("/analytics/dashboard"),
         apiRequest<Product[]>("/products"),
@@ -1178,16 +1175,19 @@ function App() {
           expiringAlerts: ExpiryAlert[];
           expirationThresholdDays: number;
           appointmentReminderMinutes?: number;
+          operationalAlerts?: OperationalAlert[];
         }>("/inventory/alerts"),
         apiRequest<Appointment[]>("/appointments"),
-        apiRequest<{ source: "aion" | "local"; insights: string[] }>(
-          "/ai/business-insights",
-        ),
         apiRequest<Patient[]>("/patients"),
         apiRequest<Consultation[]>("/consultations"),
         apiRequest<InventoryLot[]>("/inventory/lots"),
-        apiRequest<{ total: number; alerts: OperationalAlert[] }>("/operations/alerts"),
         apiRequest<CashOverview>("/cash/current"),
+      ]);
+      const [operationsResult, insightsResult, pricingResult] = await Promise.allSettled([
+        apiRequest<{ total: number; alerts: OperationalAlert[] }>("/operations/alerts"),
+        apiRequest<{ source: "aion" | "local"; insights: string[] }>(
+          "/ai/business-insights",
+        ),
         apiRequest<{ source: "aion" | "local"; suggestions: PriceSuggestion[] }>(
           `/ai/price-adjustments?marketShift=${marketShift}`,
         ),
@@ -1202,15 +1202,23 @@ function App() {
       setExpirationThresholdDays(inventoryAlerts.expirationThresholdDays);
       setAppointmentReminderMinutes(inventoryAlerts.appointmentReminderMinutes ?? 60);
       setAppointments(appointmentData);
-      setInsights(aiInsights.insights);
-      setInsightSource(aiInsights.source);
+      if (insightsResult.status === "fulfilled") {
+        setInsights(insightsResult.value.insights);
+        setInsightSource(insightsResult.value.source);
+      }
       setPatients(patientsData);
       setConsultations(consultationsData);
       setInventoryLots(lotsData);
-      setOperationalAlerts(operationsData.alerts);
+      setOperationalAlerts(
+        operationsResult.status === "fulfilled"
+          ? operationsResult.value.alerts
+          : dashboard.operationalAlerts ?? inventoryAlerts.operationalAlerts ?? [],
+      );
       setCashOverview(cashData);
-      setSuggestions(priceData.suggestions.slice(0, 10));
-      setSuggestionSource(priceData.source);
+      if (pricingResult.status === "fulfilled") {
+        setSuggestions(pricingResult.value.suggestions.slice(0, 10));
+        setSuggestionSource(pricingResult.value.source);
+      }
       setLastSyncAt(new Date());
     } catch (error) {
       showError(error, "No fue posible cargar la informacion principal.");
@@ -2432,7 +2440,7 @@ function App() {
 
     setLoadingReports(true);
     try {
-      const [salesReportData, reorderReportData, movementData, aiInsights, auditData] = await Promise.all([
+      const [salesReportData, reorderReportData, movementData, auditData] = await Promise.all([
         apiRequest<SalesReport>(
           `/reports/sales?from=${encodeURIComponent(fromDate.toISOString())}&to=${encodeURIComponent(toDate.toISOString())}`,
         ),
@@ -2442,10 +2450,12 @@ function App() {
         apiRequest<{ count: number; movements: InventoryMovementReportItem[] }>(
           "/inventory/movements?take=140",
         ),
+        apiRequest<{ count: number; logs: AuditLogEntry[] }>("/audit-log?take=140"),
+      ]);
+      const aiInsightsResult = await Promise.allSettled([
         apiRequest<{ source: "aion" | "local"; insights: string[] }>(
           "/ai/business-insights",
         ),
-        apiRequest<{ count: number; logs: AuditLogEntry[] }>("/audit-log?take=140"),
       ]);
 
       setSalesReport(salesReportData);
@@ -2454,8 +2464,10 @@ function App() {
       setAuditLogs(auditData.logs);
       setReportDays(String(daysValue));
       setCoverageDays(String(coverageValue));
-      setInsights(aiInsights.insights);
-      setInsightSource(aiInsights.source);
+      if (aiInsightsResult[0].status === "fulfilled") {
+        setInsights(aiInsightsResult[0].value.insights);
+        setInsightSource(aiInsightsResult[0].value.source);
+      }
       setLastReportsLoadedAt(new Date());
 
       return {
